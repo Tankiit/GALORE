@@ -4,13 +4,11 @@ This repository implements a comprehensive framework for RL-guided data selectio
 
 ## Features
 
-### 🎯 **Core Framework**
 - **Phase Transition Detection**: Automatically detects training phase changes using multiple signals
 - **RL-Guided Strategy Selection**: Uses reinforcement learning to adaptively choose data selection strategies
 - **Compositional Strategy Discovery**: Discovers new strategies through evolutionary composition
 - **GaLore Integration**: Gradient Low-Rank Projection for efficient gradient compression
 
-### 🖼️ **CIFAR Dataset Support**
 - **CIFAR10 Variations**:
   - Standard CIFAR10
   - Strong augmentation (ColorJitter, RandomRotation)
@@ -26,7 +24,6 @@ This repository implements a comprehensive framework for RL-guided data selectio
   - Weather: Snow, Frost, Fog
   - Digital: Brightness, Contrast, Elastic Transform, Pixelate, JPEG Compression
 
-### 🧠 **Model Architectures**
 - **CIFARResNet**: ResNet variants (depth 20 for CIFAR10, 32 for CIFAR100)
 - **CIFARVGG**: VGG-style architectures (depth 16/19)
 
