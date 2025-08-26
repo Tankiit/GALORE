@@ -28,6 +28,10 @@ import time
 import random
 import os
 from torchvision import datasets, transforms
+from torch.utils.tensorboard import SummaryWriter
+import functools
+import contextlib
+from threading import Lock
 from torchvision.datasets import CIFAR10, CIFAR100
 import torchvision.transforms.functional as TF
 
@@ -35,6 +39,470 @@ import torchvision.transforms.functional as TF
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# PROFILING AND TIMING INFRASTRUCTURE
+# =============================================================================
+
+class PerformanceProfiler:
+    """Comprehensive performance profiler with timing, memory, and TensorBoard integration."""
+    
+    def __init__(self, log_dir: str = "./logs", experiment_name: str = "experiment"):
+        self.log_dir = log_dir
+        self.experiment_name = experiment_name
+        self.timings = defaultdict(list)
+        self.memory_usage = defaultdict(list)
+        self.counters = defaultdict(int)
+        self.lock = Lock()
+        
+        # Create TensorBoard writer
+        self.writer = SummaryWriter(log_dir=f"{log_dir}/{experiment_name}")
+        
+        # Timing context managers
+        self.active_timers = {}
+        
+        logger.info(f"Performance profiler initialized. Logs: {log_dir}/{experiment_name}")
+    
+    def start_timer(self, name: str):
+        """Start timing a named operation."""
+        with self.lock:
+            self.active_timers[name] = time.perf_counter()
+    
+    def end_timer(self, name: str) -> float:
+        """End timing and record the duration."""
+        with self.lock:
+            if name not in self.active_timers:
+                logger.warning(f"Timer '{name}' was not started")
+                return 0.0
+            
+            duration = time.perf_counter() - self.active_timers[name]
+            self.timings[name].append(duration)
+            del self.active_timers[name]
+            return duration
+    
+    @contextlib.contextmanager
+    def timer(self, name: str):
+        """Context manager for timing operations."""
+        self.start_timer(name)
+        try:
+            yield
+        finally:
+            duration = self.end_timer(name)
+            logger.debug(f"{name}: {duration:.4f}s")
+    
+    def record_memory(self, name: str, device: str = "mps"):
+        """Record current memory usage."""
+        if device == "mps" and torch.backends.mps.is_available():
+            # MPS memory tracking
+            allocated = torch.mps.current_allocated_memory() / 1024**2  # MB
+            reserved = torch.mps.driver_allocated_memory() / 1024**2  # MB
+        elif device == "cuda" and torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**2  # MB
+            reserved = torch.cuda.memory_reserved() / 1024**2  # MB
+        else:
+            # CPU - use process memory
+            import psutil
+            process = psutil.Process()
+            allocated = process.memory_info().rss / 1024**2  # MB
+            reserved = allocated
+        
+        with self.lock:
+            self.memory_usage[name].append({
+                'allocated': allocated,
+                'reserved': reserved,
+                'timestamp': time.time()
+            })
+    
+    def increment_counter(self, name: str, value: int = 1):
+        """Increment a named counter."""
+        with self.lock:
+            self.counters[name] += value
+    
+    def log_metrics(self, step: int, metrics: Dict[str, float]):
+        """Log metrics to TensorBoard."""
+        for name, value in metrics.items():
+            self.writer.add_scalar(name, value, step)
+    
+    def log_timing_summary(self, step: int):
+        """Log timing summary to TensorBoard."""
+        with self.lock:
+            for name, times in self.timings.items():
+                if times:
+                    avg_time = np.mean(times)
+                    total_time = np.sum(times)
+                    self.writer.add_scalar(f"timing/{name}_avg", avg_time, step)
+                    self.writer.add_scalar(f"timing/{name}_total", total_time, step)
+    
+    def log_memory_summary(self, step: int):
+        """Log memory usage summary to TensorBoard."""
+        with self.lock:
+            for name, memory_records in self.memory_usage.items():
+                if memory_records:
+                    latest = memory_records[-1]
+                    self.writer.add_scalar(f"memory/{name}_allocated", latest['allocated'], step)
+                    self.writer.add_scalar(f"memory/{name}_reserved", latest['reserved'], step)
+    
+    def get_timing_stats(self) -> Dict[str, Dict[str, float]]:
+        """Get comprehensive timing statistics."""
+        with self.lock:
+            stats = {}
+            for name, times in self.timings.items():
+                if times:
+                    stats[name] = {
+                        'count': len(times),
+                        'total': np.sum(times),
+                        'mean': np.mean(times),
+                        'std': np.std(times),
+                        'min': np.min(times),
+                        'max': np.max(times),
+                        'median': np.median(times)
+                    }
+            return stats
+    
+    def print_summary(self):
+        """Print a comprehensive performance summary."""
+        logger.info("=" * 80)
+        logger.info("PERFORMANCE PROFILING SUMMARY")
+        logger.info("=" * 80)
+        
+        # Timing statistics
+        timing_stats = self.get_timing_stats()
+        if timing_stats:
+            logger.info("\nTIMING STATISTICS:")
+            logger.info("-" * 50)
+            for name, stats in sorted(timing_stats.items(), key=lambda x: x[1]['total'], reverse=True):
+                logger.info(f"{name:30s}: {stats['total']:8.3f}s total, "
+                          f"{stats['mean']:6.3f}s avg, {stats['count']:4d} calls")
+        
+        # Memory usage
+        with self.lock:
+            if self.memory_usage:
+                logger.info("\nMEMORY USAGE:")
+                logger.info("-" * 50)
+                for name, records in self.memory_usage.items():
+                    if records:
+                        latest = records[-1]
+                        logger.info(f"{name:30s}: {latest['allocated']:8.1f}MB allocated, "
+                                  f"{latest['reserved']:8.1f}MB reserved")
+        
+        # Counters
+        with self.lock:
+            if self.counters:
+                logger.info("\nCOUNTERS:")
+                logger.info("-" * 50)
+                for name, count in sorted(self.counters.items()):
+                    logger.info(f"{name:30s}: {count:8d}")
+        
+        logger.info("=" * 80)
+    
+    def close(self):
+        """Close the profiler and TensorBoard writer."""
+        self.print_summary()
+        print_performance_analysis(self)
+        self.writer.close()
+        logger.info("Performance profiler closed.")
+
+# Global profiler instance
+_profiler = None
+
+def get_profiler() -> PerformanceProfiler:
+    """Get the global profiler instance."""
+    global _profiler
+    if _profiler is None:
+        _profiler = PerformanceProfiler()
+    return _profiler
+
+def init_profiler(log_dir: str = "./logs", experiment_name: str = "experiment") -> PerformanceProfiler:
+    """Initialize the global profiler."""
+    global _profiler
+    _profiler = PerformanceProfiler(log_dir, experiment_name)
+    return _profiler
+
+def timing_decorator(name: str = None):
+    """Decorator to automatically time function execution."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            timer_name = name or f"{func.__module__}.{func.__name__}"
+            profiler = get_profiler()
+            with profiler.timer(timer_name):
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+def memory_tracking_decorator(name: str = None, device: str = "mps"):
+    """Decorator to track memory usage before and after function execution."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            timer_name = name or f"{func.__module__}.{func.__name__}"
+            profiler = get_profiler()
+            
+            profiler.record_memory(f"{timer_name}_before", device)
+            result = func(*args, **kwargs)
+            profiler.record_memory(f"{timer_name}_after", device)
+            
+            return result
+        return wrapper
+    return decorator
+
+# =============================================================================
+# PERFORMANCE ANALYSIS AND REPORTING
+# =============================================================================
+
+def analyze_performance_bottlenecks(profiler: PerformanceProfiler) -> Dict[str, Any]:
+    """Analyze performance bottlenecks and provide recommendations."""
+    timing_stats = profiler.get_timing_stats()
+    
+    if not timing_stats:
+        return {"message": "No timing data available"}
+    
+    # Find bottlenecks
+    total_time = sum(stats['total'] for stats in timing_stats.values())
+    bottlenecks = []
+    
+    for name, stats in timing_stats.items():
+        percentage = (stats['total'] / total_time) * 100
+        if percentage > 10:  # More than 10% of total time
+            bottlenecks.append({
+                'operation': name,
+                'total_time': stats['total'],
+                'percentage': percentage,
+                'avg_time': stats['mean'],
+                'call_count': stats['count']
+            })
+    
+    # Sort by total time
+    bottlenecks.sort(key=lambda x: x['total_time'], reverse=True)
+    
+    # Generate recommendations
+    recommendations = []
+    for bottleneck in bottlenecks:
+        if 'coreset_selection' in bottleneck['operation']:
+            recommendations.append("Consider optimizing coreset selection algorithm or reducing selection frequency")
+        elif 'evaluation' in bottleneck['operation']:
+            recommendations.append("Consider reducing evaluation frequency or using smaller validation sets")
+        elif 'training' in bottleneck['operation']:
+            recommendations.append("Consider optimizing batch size or model architecture")
+        elif 'svd' in bottleneck['operation'].lower():
+            recommendations.append("SVD operations are expensive - consider reducing rank or using approximations")
+    
+    return {
+        'total_time': total_time,
+        'bottlenecks': bottlenecks,
+        'recommendations': recommendations,
+        'summary': f"Found {len(bottlenecks)} major bottlenecks consuming {sum(b['percentage'] for b in bottlenecks):.1f}% of total time"
+    }
+
+def print_performance_analysis(profiler: PerformanceProfiler):
+    """Print detailed performance analysis."""
+    analysis = analyze_performance_bottlenecks(profiler)
+    
+    logger.info("\n" + "=" * 80)
+    logger.info("PERFORMANCE ANALYSIS")
+    logger.info("=" * 80)
+    
+    if 'message' in analysis:
+        logger.info(analysis['message'])
+        return
+    
+    logger.info(f"Total execution time: {analysis['total_time']:.2f} seconds")
+    logger.info(f"Analysis: {analysis['summary']}")
+    
+    if analysis['bottlenecks']:
+        logger.info("\nMAJOR BOTTLENECKS:")
+        logger.info("-" * 50)
+        for i, bottleneck in enumerate(analysis['bottlenecks'], 1):
+            logger.info(f"{i}. {bottleneck['operation']}")
+            logger.info(f"   Time: {bottleneck['total_time']:.3f}s ({bottleneck['percentage']:.1f}%)")
+            logger.info(f"   Avg per call: {bottleneck['avg_time']:.3f}s ({bottleneck['call_count']} calls)")
+    
+    if analysis['recommendations']:
+        logger.info("\nRECOMMENDATIONS:")
+        logger.info("-" * 50)
+        for i, rec in enumerate(analysis['recommendations'], 1):
+            logger.info(f"{i}. {rec}")
+    
+    logger.info("=" * 80)
+
+# =============================================================================
+# INTERMEDIATE RESULTS MANAGER
+# =============================================================================
+
+class IntermediateResultsManager:
+    """Manages saving and loading of intermediate results and checkpoints."""
+    
+    def __init__(self, output_dir: str, experiment_name: str, config_args=None):
+        self.output_dir = output_dir
+        self.experiment_name = experiment_name
+        self.config_args = config_args
+        
+        # Create directories
+        self.checkpoint_dir = os.path.join(output_dir, "checkpoints", experiment_name)
+        self.intermediate_dir = os.path.join(output_dir, "intermediate", experiment_name)
+        self.strategy_dir = os.path.join(output_dir, "strategy_data", experiment_name)
+        self.timing_dir = os.path.join(output_dir, "timing_data", experiment_name)
+        self.coreset_dir = os.path.join(output_dir, "coreset_data", experiment_name)
+        
+        for dir_path in [self.checkpoint_dir, self.intermediate_dir, self.strategy_dir, 
+                        self.timing_dir, self.coreset_dir]:
+            os.makedirs(dir_path, exist_ok=True)
+        
+        # Data storage
+        self.epoch_data = []
+        self.strategy_history = []
+        self.timing_history = []
+        self.coreset_history = []
+        self.performance_history = []
+        
+        logger.info(f"Intermediate results manager initialized: {output_dir}/{experiment_name}")
+    
+    def save_epoch_data(self, epoch: int, data: Dict[str, Any]):
+        """Save epoch-level data."""
+        epoch_data = {
+            'epoch': epoch,
+            'timestamp': time.time(),
+            'data': data
+        }
+        self.epoch_data.append(epoch_data)
+        
+        # Save individual epoch file
+        epoch_file = os.path.join(self.intermediate_dir, f"epoch_{epoch:04d}.json")
+        with open(epoch_file, 'w') as f:
+            json.dump(epoch_data, f, indent=2, default=str)
+    
+    def save_strategy_data(self, epoch: int, strategy_info: Dict[str, Any]):
+        """Save strategy selection data."""
+        strategy_data = {
+            'epoch': epoch,
+            'timestamp': time.time(),
+            'strategy_info': strategy_info
+        }
+        self.strategy_history.append(strategy_data)
+        
+        # Save individual strategy file
+        strategy_file = os.path.join(self.strategy_dir, f"strategy_{epoch:04d}.json")
+        with open(strategy_file, 'w') as f:
+            json.dump(strategy_data, f, indent=2, default=str)
+    
+    def save_timing_data(self, epoch: int, timing_data: Dict[str, Any]):
+        """Save timing and performance data."""
+        timing_entry = {
+            'epoch': epoch,
+            'timestamp': time.time(),
+            'timing_data': timing_data
+        }
+        self.timing_history.append(timing_entry)
+        
+        # Save individual timing file
+        timing_file = os.path.join(self.timing_dir, f"timing_{epoch:04d}.json")
+        with open(timing_file, 'w') as f:
+            json.dump(timing_entry, f, indent=2, default=str)
+    
+    def save_coreset_data(self, epoch: int, coreset_info: Dict[str, Any]):
+        """Save coreset selection data."""
+        coreset_data = {
+            'epoch': epoch,
+            'timestamp': time.time(),
+            'coreset_info': coreset_info
+        }
+        self.coreset_history.append(coreset_data)
+        
+        # Save individual coreset file
+        coreset_file = os.path.join(self.coreset_dir, f"coreset_{epoch:04d}.json")
+        with open(coreset_file, 'w') as f:
+            json.dump(coreset_data, f, indent=2, default=str)
+    
+    def save_checkpoint(self, epoch: int, model: nn.Module, optimizer, scheduler, 
+                       selector: 'RLGuidedGaLoreSelector', additional_data: Dict[str, Any] = None):
+        """Save model checkpoint."""
+        checkpoint = {
+            'epoch': epoch,
+            'timestamp': time.time(),
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+            'selector_state': {
+                'strategy_rewards': selector.strategy_rewards,
+                'phase_detector_state': selector.phase_detector.get_state() if hasattr(selector.phase_detector, 'get_state') else None,
+                'rl_agent_state': selector.rl_agent.get_state() if hasattr(selector.rl_agent, 'get_state') else None,
+                'step': selector.step,
+                'epoch': selector.epoch
+            },
+            'additional_data': additional_data or {}
+        }
+        
+        checkpoint_file = os.path.join(self.checkpoint_dir, f"checkpoint_epoch_{epoch:04d}.pt")
+        torch.save(checkpoint, checkpoint_file)
+        
+        # Also save latest checkpoint
+        latest_file = os.path.join(self.checkpoint_dir, "latest_checkpoint.pt")
+        torch.save(checkpoint, latest_file)
+        
+        logger.info(f"Checkpoint saved: {checkpoint_file}")
+    
+    def load_checkpoint(self, checkpoint_path: str, model: nn.Module, optimizer, scheduler, 
+                       selector: 'RLGuidedGaLoreSelector'):
+        """Load model checkpoint."""
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if scheduler and checkpoint['scheduler_state_dict']:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        # Restore selector state
+        if 'selector_state' in checkpoint:
+            selector_state = checkpoint['selector_state']
+            selector.strategy_rewards = selector_state.get('strategy_rewards', {})
+            selector.step = selector_state.get('step', 0)
+            selector.epoch = selector_state.get('epoch', 0)
+            
+            if hasattr(selector.phase_detector, 'set_state') and selector_state.get('phase_detector_state'):
+                selector.phase_detector.set_state(selector_state['phase_detector_state'])
+            
+            if hasattr(selector.rl_agent, 'set_state') and selector_state.get('rl_agent_state'):
+                selector.rl_agent.set_state(selector_state['rl_agent_state'])
+        
+        logger.info(f"Checkpoint loaded: {checkpoint_path}")
+        return checkpoint['epoch'], checkpoint.get('additional_data', {})
+    
+    def save_final_summary(self, final_results: Dict[str, Any]):
+        """Save final comprehensive summary."""
+        summary = {
+            'experiment_name': self.experiment_name,
+            'config': vars(self.config_args) if self.config_args else {},
+            'final_results': final_results,
+            'epoch_data': self.epoch_data,
+            'strategy_history': self.strategy_history,
+            'timing_history': self.timing_history,
+            'coreset_history': self.coreset_history,
+            'performance_history': self.performance_history,
+            'summary_timestamp': time.time()
+        }
+        
+        summary_file = os.path.join(self.output_dir, f"{self.experiment_name}_complete_summary.json")
+        with open(summary_file, 'w') as f:
+            json.dump(summary, f, indent=2, default=str)
+        
+        logger.info(f"Complete summary saved: {summary_file}")
+        return summary_file
+    
+    def save_analysis_data(self, profiler: PerformanceProfiler):
+        """Save detailed analysis data from profiler."""
+        analysis_data = {
+            'timing_stats': profiler.get_timing_stats(),
+            'memory_usage': dict(profiler.memory_usage),
+            'counters': dict(profiler.counters),
+            'performance_analysis': analyze_performance_bottlenecks(profiler),
+            'timestamp': time.time()
+        }
+        
+        analysis_file = os.path.join(self.output_dir, f"{self.experiment_name}_analysis.json")
+        with open(analysis_file, 'w') as f:
+            json.dump(analysis_data, f, indent=2, default=str)
+        
+        logger.info(f"Analysis data saved: {analysis_file}")
+        return analysis_file
 
 # =============================================================================
 # CIFAR Dataset Variations and Corruptions
@@ -1283,8 +1751,14 @@ class GaLore:
             try:
                 # Try SVD with better error handling
                 if hasattr(torch, 'svd_lowrank'):
-                    U, _, V = torch.svd_lowrank(grad_2d, q=self.rank)
-                    self.projectors[name] = (U.detach(), V.detach())
+                    # For MPS device, move to CPU for SVD then back
+                    if grad_2d.device.type == 'mps':
+                        grad_2d_cpu = grad_2d.cpu()
+                        U, _, V = torch.svd_lowrank(grad_2d_cpu, q=self.rank)
+                        self.projectors[name] = (U.detach().to(grad.device), V.detach().to(grad.device))
+                    else:
+                        U, _, V = torch.svd_lowrank(grad_2d, q=self.rank)
+                        self.projectors[name] = (U.detach(), V.detach())
                 else:
                     # Fallback for older PyTorch versions
                     raise RuntimeError("svd_lowrank not available")
@@ -1298,8 +1772,15 @@ class GaLore:
                 # Try to use QR decomposition with fallback
                 try:
                     if hasattr(torch, 'linalg') and hasattr(torch.linalg, 'qr'):
-                        U, _ = torch.linalg.qr(U)
-                        V, _ = torch.linalg.qr(V)
+                        # For MPS device, move to CPU for QR decomposition then back
+                        if U.device.type == 'mps':
+                            U_cpu, _ = torch.linalg.qr(U.cpu())
+                            V_cpu, _ = torch.linalg.qr(V.cpu())
+                            U = U_cpu.to(U.device)
+                            V = V_cpu.to(V.device)
+                        else:
+                            U, _ = torch.linalg.qr(U)
+                            V, _ = torch.linalg.qr(V)
                     else:
                         # Fallback for older PyTorch versions
                         U = U / torch.norm(U, dim=0, keepdim=True)
@@ -1371,6 +1852,7 @@ class RLGuidedGaLoreSelector:
         
         logger.info(f"Initialized RL-Guided GaLore Selector with rank={rank}")
         
+    @timing_decorator("select_coreset")
     def select_coreset(self, 
                       budget: int,
                       current_performance: float) -> Tuple[List[int], Dict[str, Any]]:
@@ -1845,6 +2327,7 @@ def plot_phase_transitions(selector: RLGuidedGaLoreSelector):
 # CIFAR Experiments with Various Variations
 # =============================================================================
 
+@timing_decorator("run_cifar_experiments")
 def run_cifar_experiments(experiment_type: str = "all", 
                           data_dir: str = "/Users/tanmoy/research/data",
                           device: str = "cuda" if torch.cuda.is_available() else "mps",
@@ -1862,18 +2345,39 @@ def run_cifar_experiments(experiment_type: str = "all",
         device: Device to run experiments on
     """
     
-    logger.info(f"Starting CIFAR experiments on {device}")
+    # Initialize profiler for the entire experiment suite
+    experiment_name = f"cifar_experiments_{experiment_type}_{device}"
+    profiler = init_profiler(log_dir="./logs", experiment_name=experiment_name)
+    profiler.record_memory("experiment_suite_start", device)
     
-    if experiment_type in ["cifar10", "all"]:
-        run_cifar10_experiments(data_dir, device, config_args)
+    logger.info("=" * 80)
+    logger.info("STARTING CIFAR EXPERIMENT SUITE")
+    logger.info("=" * 80)
+    logger.info(f"Experiment type: {experiment_type}")
+    logger.info(f"Device: {device}")
+    logger.info(f"Data directory: {data_dir}")
+    logger.info(f"TensorBoard logs: ./logs/{experiment_name}")
+    logger.info("=" * 80)
     
-    if experiment_type in ["cifar100", "all"]:
-        run_cifar100_experiments(data_dir, device, config_args)
-    
-    if experiment_type in ["corruptions", "all"]:
-        run_corruption_experiments(data_dir, device, config_args)
-    
-    logger.info("CIFAR experiments completed!")
+    try:
+        if experiment_type in ["cifar10", "all"]:
+            with profiler.timer("cifar10_experiments"):
+                run_cifar10_experiments(data_dir, device, config_args)
+        
+        if experiment_type in ["cifar100", "all"]:
+            with profiler.timer("cifar100_experiments"):
+                run_cifar100_experiments(data_dir, device, config_args)
+        
+        if experiment_type in ["corruptions", "all"]:
+            with profiler.timer("corruption_experiments"):
+                run_corruption_experiments(data_dir, device, config_args)
+        
+        logger.info("CIFAR experiments completed!")
+        
+    finally:
+        # Always close profiler and print summary
+        profiler.record_memory("experiment_suite_end", device)
+        profiler.close()
 
 
 def run_cifar10_experiments(data_dir: str, device: str, config_args=None):
@@ -2117,6 +2621,8 @@ def run_corruption_experiments(data_dir: str, device: str, config_args=None):
     return results
 
 
+@timing_decorator("run_single_cifar_experiment")
+@memory_tracking_decorator("run_single_cifar_experiment")
 def run_single_cifar_experiment(selector: RLGuidedGaLoreSelector,
                                model: nn.Module,
                                train_dataset: Dataset,
@@ -2145,6 +2651,11 @@ def run_single_cifar_experiment(selector: RLGuidedGaLoreSelector,
     
     logger.info(f"Running experiment on {dataset_name} for {epochs} epochs")
     
+    # Initialize intermediate results manager
+    output_dir = config_args.output_dir if config_args else "./results"
+    experiment_name = f"{dataset_name}_{device}_{epochs}epochs"
+    results_manager = IntermediateResultsManager(output_dir, experiment_name, config_args)
+    
     # Training setup
     lr = config_args.learning_rate if config_args else 0.001
     weight_decay = config_args.weight_decay if config_args else 1e-4
@@ -2167,52 +2678,160 @@ def run_single_cifar_experiment(selector: RLGuidedGaLoreSelector,
     # Replay buffer for RL
     replay_buffer = []
     
-    # Training loop
-    for epoch in range(epochs):
-        # Evaluate current performance
-        val_loss, val_acc = evaluate_cifar_model(model, val_dataset, device)
-        current_performance = val_acc  # Higher is better
-        
-        # Select coreset
-        selected_indices, selection_info = selector.select_coreset(
-            coreset_budget, current_performance
-        )
-        
-        # Log selection info
-        if epoch % 10 == 0:
-            logger.info(f"Epoch {epoch}: Phase={selection_info['current_phase']}, "
-                       f"Strategy={selection_info['selected_strategy']}, "
-                       f"Val Acc={val_acc:.3f}")
-        
-        # Train on selected coreset
-        coreset = Subset(train_dataset, selected_indices)
-        coreset_loader = DataLoader(coreset, batch_size=batch_size, shuffle=True)
-        
-        model.train()
-        train_loss = 0
-        for batch_idx, (data, labels) in enumerate(coreset_loader):
-            data, labels = data.to(device), labels.to(device)
+    # Initialize profiler for this experiment
+    profiler = get_profiler()
+    profiler.record_memory("experiment_start", device)
+    
+    # Training loop with progress bar
+    epoch_pbar = tqdm(range(epochs), desc=f"Training {dataset_name}", 
+                     unit="epoch", position=0, leave=True)
+    
+    for epoch in epoch_pbar:
+        # Time the entire epoch
+        with profiler.timer(f"epoch_{epoch}_total"):
+            # Evaluate current performance
+            with profiler.timer(f"epoch_{epoch}_evaluation"):
+                val_loss, val_acc = evaluate_cifar_model(model, val_dataset, device)
+                current_performance = val_acc  # Higher is better
             
-            optimizer.zero_grad()
-            outputs = model(data)
-            loss = F.cross_entropy(outputs, labels)
-            loss.backward()
-            optimizer.step()
+            # Select coreset
+            with profiler.timer(f"epoch_{epoch}_coreset_selection"):
+                selected_indices, selection_info = selector.select_coreset(
+                    coreset_budget, current_performance
+                )
             
-            train_loss += loss.item()
+            # Save intermediate results if enabled
+            if config_args and config_args.save_intermediate:
+                # Save strategy data
+                if config_args.save_strategy_data:
+                    results_manager.save_strategy_data(epoch, selection_info)
+                
+                # Save coreset data
+                if config_args.save_coreset_data:
+                    coreset_info = {
+                        'selected_indices': selected_indices,
+                        'coreset_size': len(selected_indices),
+                        'budget': coreset_budget,
+                        'selection_time': profiler.timings.get(f"epoch_{epoch}_coreset_selection", [0])[-1] if f"epoch_{epoch}_coreset_selection" in profiler.timings else 0
+                    }
+                    results_manager.save_coreset_data(epoch, coreset_info)
             
-            # Progress bar for large datasets
-            if len(coreset_loader) > 100 and batch_idx % 50 == 0:
-                logger.info(f"  Batch {batch_idx}/{len(coreset_loader)}")
-        
-        scheduler.step()
-        avg_train_loss = train_loss / len(coreset_loader)
-        
-        # Evaluate new performance
-        new_val_loss, new_val_acc = evaluate_cifar_model(model, val_dataset, device)
-        
-        # Compute reward for RL
-        reward = new_val_acc - val_acc  # Improvement in accuracy
+            # Log selection info and update progress bar
+            if epoch % 10 == 0:
+                logger.info(f"Epoch {epoch}: Phase={selection_info['current_phase']}, "
+                           f"Strategy={selection_info['selected_strategy']}, "
+                           f"Val Acc={val_acc:.3f}")
+            
+            # Update progress bar with current metrics
+            epoch_pbar.set_postfix({
+                'val_acc': f'{val_acc:.3f}',
+                'phase': selection_info['current_phase'],
+                'strategy': selection_info['selected_strategy']
+            })
+            
+            # Train on selected coreset
+            with profiler.timer(f"epoch_{epoch}_training"):
+                coreset = Subset(train_dataset, selected_indices)
+                coreset_loader = DataLoader(coreset, batch_size=batch_size, shuffle=True)
+                
+                model.train()
+                train_loss = 0
+                
+                # Add batch-level progress bar
+                batch_pbar = tqdm(coreset_loader, desc=f"Epoch {epoch} batches", 
+                                unit="batch", position=1, leave=False)
+                
+                for batch_idx, (data, labels) in enumerate(batch_pbar):
+                    with profiler.timer(f"epoch_{epoch}_batch_{batch_idx}"):
+                        data, labels = data.to(device), labels.to(device)
+                        
+                        optimizer.zero_grad()
+                        outputs = model(data)
+                        loss = F.cross_entropy(outputs, labels)
+                        loss.backward()
+                        optimizer.step()
+            
+                        train_loss += loss.item()
+                        
+                        # Update batch progress bar
+                        batch_pbar.set_postfix({
+                            'loss': f'{loss.item():.4f}',
+                            'avg_loss': f'{train_loss/(batch_idx+1):.4f}'
+                        })
+                
+                # Close batch progress bar
+                batch_pbar.close()
+            
+            scheduler.step()
+            avg_train_loss = train_loss / len(coreset_loader)
+            
+            # Evaluate new performance
+            with profiler.timer(f"epoch_{epoch}_final_evaluation"):
+                new_val_loss, new_val_acc = evaluate_cifar_model(model, val_dataset, device)
+            
+            # Compute reward for RL
+            reward = new_val_acc - val_acc  # Improvement in accuracy
+            
+            # Log metrics to TensorBoard
+            profiler.log_metrics(epoch, {
+                'train/loss': avg_train_loss,
+                'val/loss': new_val_loss,
+                'val/accuracy': new_val_acc,
+                'val/accuracy_improvement': reward,
+                'coreset/budget': coreset_budget,
+                'coreset/selected_size': len(selected_indices),
+                'strategy/selected': selection_info['selected_strategy'],
+                'phase/current': selection_info['current_phase']
+            })
+            
+            # Save timing data if enabled
+            if config_args and config_args.save_intermediate and config_args.save_timing_data:
+                timing_data = {
+                    'epoch_timing': {
+                        'total': profiler.timings.get(f"epoch_{epoch}_total", [0])[-1] if f"epoch_{epoch}_total" in profiler.timings else 0,
+                        'evaluation': profiler.timings.get(f"epoch_{epoch}_evaluation", [0])[-1] if f"epoch_{epoch}_evaluation" in profiler.timings else 0,
+                        'coreset_selection': profiler.timings.get(f"epoch_{epoch}_coreset_selection", [0])[-1] if f"epoch_{epoch}_coreset_selection" in profiler.timings else 0,
+                        'training': profiler.timings.get(f"epoch_{epoch}_training", [0])[-1] if f"epoch_{epoch}_training" in profiler.timings else 0,
+                        'final_evaluation': profiler.timings.get(f"epoch_{epoch}_final_evaluation", [0])[-1] if f"epoch_{epoch}_final_evaluation" in profiler.timings else 0
+                    },
+                    'performance_metrics': {
+                        'train_loss': avg_train_loss,
+                        'val_loss': new_val_loss,
+                        'val_acc': new_val_acc,
+                        'accuracy_improvement': reward
+                    }
+                }
+                results_manager.save_timing_data(epoch, timing_data)
+            
+            # Save epoch data
+            if config_args and config_args.save_intermediate:
+                epoch_data = {
+                    'train_loss': avg_train_loss,
+                    'val_loss': new_val_loss,
+                    'val_acc': new_val_acc,
+                    'accuracy_improvement': reward,
+                    'learning_rate': scheduler.get_last_lr()[0] if scheduler else lr,
+                    'coreset_size': len(selected_indices)
+                }
+                results_manager.save_epoch_data(epoch, epoch_data)
+            
+            # Save checkpoint if enabled
+            if config_args and config_args.save_intermediate and epoch % config_args.checkpoint_freq == 0:
+                additional_data = {
+                    'train_loss': avg_train_loss,
+                    'val_loss': new_val_loss,
+                    'val_acc': new_val_acc,
+                    'accuracy_improvement': reward,
+                    'strategy_used': selection_info['selected_strategy'],
+                    'phase': selection_info['current_phase']
+                }
+                results_manager.save_checkpoint(epoch, model, optimizer, scheduler, selector, additional_data)
+            
+            # Log timing and memory every 10 epochs
+            if epoch % 10 == 0:
+                profiler.log_timing_summary(epoch)
+                profiler.log_memory_summary(epoch)
+                profiler.record_memory(f"epoch_{epoch}_end", device)
         
         # Update strategy rewards
         # Map strategy value back to enum member
@@ -2279,6 +2898,16 @@ def run_single_cifar_experiment(selector: RLGuidedGaLoreSelector,
     }
     
     logger.info(f"Experiment completed. Final accuracy: {val_accuracies[-1]:.3f}")
+    
+    # Save final comprehensive results
+    if config_args and config_args.save_intermediate:
+        # Save final summary
+        results_manager.save_final_summary(results)
+        
+        # Save analysis data
+        results_manager.save_analysis_data(profiler)
+        
+        logger.info(f"All intermediate results saved to: {output_dir}/{experiment_name}")
     
     return results
 
@@ -2582,7 +3211,7 @@ Examples:
     
     # Device settings
     parser.add_argument('--device', type=str, default='auto',
-                       choices=['auto', 'cpu', 'cuda'],
+                       choices=['auto', 'cpu', 'cuda', 'mps'],
                        help='Device to run experiments on (default: auto)')
     
     # Training parameters
@@ -2594,6 +3223,10 @@ Examples:
                        help='Learning rate (default: 0.001)')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                        help='Weight decay (default: 1e-4)')
+    parser.add_argument('--scheduler_step_size', type=int, default=20,
+                       help='Step size for learning rate scheduler (default: 20)')
+    parser.add_argument('--scheduler_gamma', type=float, default=0.5,
+                       help='Gamma for learning rate scheduler (default: 0.5)')
     
     # Coreset selection parameters
     parser.add_argument('--coreset_budget', type=int, default=1000,
@@ -2629,6 +3262,28 @@ Examples:
                        help='Generate result plots (default: True)')
     parser.add_argument('--output_dir', type=str, default='./results',
                        help='Output directory for results (default: ./results)')
+    
+    # Profiling and logging options
+    parser.add_argument('--enable_profiling', action='store_true', default=True,
+                       help='Enable performance profiling (default: True)')
+    parser.add_argument('--log_dir', type=str, default='./logs',
+                       help='Directory for TensorBoard logs (default: ./logs)')
+    parser.add_argument('--profile_memory', action='store_true', default=True,
+                       help='Enable memory profiling (default: True)')
+    parser.add_argument('--profile_timing', action='store_true', default=True,
+                       help='Enable detailed timing profiling (default: True)')
+    
+    # Intermediate results saving
+    parser.add_argument('--save_intermediate', action='store_true', default=True,
+                       help='Save intermediate results and checkpoints (default: True)')
+    parser.add_argument('--checkpoint_freq', type=int, default=10,
+                       help='Save checkpoint every N epochs (default: 10)')
+    parser.add_argument('--save_strategy_data', action='store_true', default=True,
+                       help='Save detailed strategy selection data (default: True)')
+    parser.add_argument('--save_timing_data', action='store_true', default=True,
+                       help='Save detailed timing and performance data (default: True)')
+    parser.add_argument('--save_coreset_data', action='store_true', default=True,
+                       help='Save coreset selection data (default: True)')
     
     # Quick test mode
     parser.add_argument('--quick', action='store_true',
@@ -2714,6 +3369,18 @@ Examples:
         )
         
         logger.info("All experiments completed successfully!")
+        
+        # Print TensorBoard instructions
+        if args.enable_profiling:
+            log_dir = args.log_dir
+            experiment_name = f"cifar_experiments_{args.experiment}_{device}"
+            logger.info("\n" + "=" * 80)
+            logger.info("TENSORBOARD VISUALIZATION")
+            logger.info("=" * 80)
+            logger.info(f"To view detailed metrics and timing profiles, run:")
+            logger.info(f"tensorboard --logdir {log_dir}/{experiment_name}")
+            logger.info(f"Then open http://localhost:6006 in your browser")
+            logger.info("=" * 80)
         
         # Save final results summary
         if args.save_results:
