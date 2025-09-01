@@ -1,0 +1,20 @@
+{
+  "model": "gpt2",
+  "dataset": "wikitext103_quality_stratified",
+  "config": {
+    "epochs": 1,
+    "batch_size": 2,
+    "coreset_budget": 50,
+    "use_llm_hypernetwork": true
+  },
+  "results": {
+    "best_perplexity": 5.127276648717026,
+    "final_perplexity": 5.127276648717026,
+    "train_losses": [
+      4.755021147727966
+    ],
+    "val_perplexities": [
+      5.127276648717026
+    ]
+  }
+}

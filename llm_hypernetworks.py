@@ -80,7 +80,10 @@ class PerplexityScoring(LLMScoringFunction):
         
         # Compute perplexity
         with torch.no_grad():
-            outputs = self.model(**inputs, labels=inputs['input_ids'])
+            # If labels not in inputs, add them
+            if 'labels' not in inputs:
+                inputs['labels'] = inputs['input_ids']
+            outputs = self.model(**inputs)
             perplexity = torch.exp(outputs.loss).item()
         
         # Normalize and apply diminishing returns
@@ -199,7 +202,10 @@ class GradientAlignmentScoring(LLMScoringFunction):
         
         # Compute gradient for this sample
         self.model.zero_grad()
-        outputs = self.model(**inputs, labels=inputs['input_ids'])
+        # If labels not in inputs, add them
+        if 'labels' not in inputs:
+            inputs['labels'] = inputs['input_ids']
+        outputs = self.model(**inputs)
         loss = outputs.loss
         loss.backward()
         
@@ -246,11 +252,18 @@ class TokenImportanceScoring(LLMScoringFunction):
         
         # Enable gradient computation for embeddings
         self.model.zero_grad()
-        inputs_embeds = self.model.get_input_embeddings()(inputs['input_ids'])
-        inputs_embeds.requires_grad = True
+        
+        # Get input embeddings
+        input_ids = inputs['input_ids']
+        if len(input_ids.shape) == 1:
+            input_ids = input_ids.unsqueeze(0)  # Add batch dimension if missing
+            
+        inputs_embeds = self.model.get_input_embeddings()(input_ids)
+        # Clone to make it a leaf variable that can have requires_grad set
+        inputs_embeds = inputs_embeds.detach().requires_grad_(True)
         
         # Forward pass with embedded inputs
-        outputs = self.model(inputs_embeds=inputs_embeds, labels=inputs['input_ids'])
+        outputs = self.model(inputs_embeds=inputs_embeds, labels=input_ids)
         loss = outputs.loss
         
         # Compute gradient w.r.t. input embeddings
@@ -279,7 +292,15 @@ class RepetitionPenaltyScoring(LLMScoringFunction):
         if isinstance(text_data, str):
             tokens = self.tokenizer.encode(text_data, truncation=True, max_length=512)
         else:
-            tokens = text_data.get('input_ids', [])[0].tolist()
+            # Handle pre-tokenized input - can be dict or tensor
+            if isinstance(text_data, dict):
+                input_ids = text_data.get('input_ids', [])
+                if hasattr(input_ids, 'tolist'):
+                    tokens = input_ids.tolist() if len(input_ids.shape) == 1 else input_ids[0].tolist()
+                else:
+                    tokens = input_ids
+            else:
+                tokens = []
         
         # Extract n-grams (3-grams)
         n = 3
@@ -442,7 +463,9 @@ class LLMMultiScoringHypernetwork(nn.Module):
             temperature: Temperature for exploration
             value: State value estimate
         """
-        state_tensor = state.to_tensor().unsqueeze(0)  # [1, state_dim]
+        # Get the device of the model parameters
+        device = next(self.parameters()).device
+        state_tensor = state.to_tensor().unsqueeze(0).to(device)  # [1, state_dim]
         
         # Encode state
         encoded = self.state_encoder(state_tensor)  # [1, hidden_dim]
@@ -519,7 +542,7 @@ class LLMCoresetSelector:
             weights, temperature, value = self.hypernetwork(training_state)
         
         if verbose:
-            logger.info(f"LLM Hypernetwork weights: {dict(zip(self.hypernetwork.function_names, weights.numpy()))}")
+            logger.info(f"LLM Hypernetwork weights: {dict(zip(self.hypernetwork.function_names, weights.cpu().numpy()))}")
             logger.info(f"Temperature: {temperature.item():.3f}, Value: {value.item():.3f}")
         
         # Store weights for analysis
