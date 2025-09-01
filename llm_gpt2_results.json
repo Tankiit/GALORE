@@ -2,19 +2,23 @@
   "model": "gpt2",
   "dataset": "wikitext103_quality_stratified",
   "config": {
-    "epochs": 1,
-    "batch_size": 2,
-    "coreset_budget": 50,
+    "epochs": 3,
+    "batch_size": 4,
+    "coreset_budget": 500,
     "use_llm_hypernetwork": true
   },
   "results": {
-    "best_perplexity": 5.127276648717026,
-    "final_perplexity": 5.127276648717026,
+    "best_perplexity": 3.9319663626659778,
+    "final_perplexity": 4.017480172702838,
     "train_losses": [
-      4.755021147727966
+      2.980249398827553,
+      0.8304712567329406,
+      0.7110830199718475
     ],
     "val_perplexities": [
-      5.127276648717026
+      4.186389827039432,
+      3.9319663626659778,
+      4.017480172702838
     ]
   }
 }
