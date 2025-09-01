@@ -54,6 +54,15 @@ class ExperimentConfig:
     tournament_size: int = 5
     mutation_rate: float = 0.1
     
+    # Hypernetwork settings
+    use_hypernetwork: bool = True
+    hypernet_hidden_dim: int = 64  # Reduced for faster training
+    hypernet_attention_heads: int = 2  # Reduced for efficiency
+    hypernet_learning_rate: float = 0.001  # Higher for faster convergence
+    hypernet_lazy_eval: bool = True  # Enable lazy evaluation for speed
+    hypernet_cache_size: int = 5000  # Smaller cache for CIFAR10
+    hypernet_update_freq: int = 5  # Update hypernetwork every N epochs
+    
     # Corruption experiment settings
     corruption_severities: List[int] = None
     corruption_types_subset: List[str] = None

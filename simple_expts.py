@@ -35,6 +35,34 @@ from threading import Lock
 from torchvision.datasets import CIFAR10, CIFAR100
 import torchvision.transforms.functional as TF
 
+# Import hypernetwork components
+from hypernetwork import (
+    MultiScoringHypernetwork,
+    SubmodularMultiScoringSelector,
+    TrainingState as HypernetTrainingState,
+    create_scoring_functions,
+    GradientMagnitudeScoring,
+    DiversityScoring,
+    UncertaintyScoring,
+    BoundaryScoring,
+    InfluenceScoring,
+    ForgetScoring
+)
+
+# Import LLM hypernetwork components
+try:
+    from llm_hypernetworks import (
+        LLMMultiScoringHypernetwork,
+        LLMCoresetSelector,
+        LLMTrainingState,
+        create_llm_scoring_functions,
+        create_llm_hypernetwork
+    )
+    LLM_HYPERNETWORK_AVAILABLE = True
+except ImportError:
+    logger.warning("LLM hypernetwork module not available")
+    LLM_HYPERNETWORK_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1405,6 +1433,8 @@ class SelectionStrategy(Enum):
     GRADIENT_CONFLICT = "grad_conflict"
     FORGETTING = "forgetting"
     HYBRID = "hybrid"
+    HYPERNETWORK = "hypernetwork"  # New hypernetwork-based multi-scoring strategy
+    LLM_HYPERNETWORK = "llm_hypernetwork"  # LLM-specific hypernetwork strategy
 
 
 @dataclass
@@ -1461,7 +1491,7 @@ class AdaptiveSelectionPolicy(nn.Module):
     based on training phase and performance feedback
     """
     
-    def __init__(self, state_dim: int = 21, hidden_dim: int = 256, num_strategies: int = 8):
+    def __init__(self, state_dim: int = 22, hidden_dim: int = 256, num_strategies: int = 9):
         super().__init__()
         
         # Actor network (outputs strategy weights)
@@ -1817,11 +1847,14 @@ class RLGuidedGaLoreSelector:
                  train_dataset: Dataset,
                  val_dataset: Dataset,
                  memory_budget_mb: int = 1000,
-                 rank: int = 256):
+                 rank: int = 256,
+                 use_hypernetwork: bool = True):
         
         self.model = model
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
+        self.use_hypernetwork = use_hypernetwork
+        
         # Get device safely
         try:
             self.device = next(model.parameters()).device
@@ -1835,6 +1868,51 @@ class RLGuidedGaLoreSelector:
         self.galore = GaLore(rank=rank)
         self.rl_policy = AdaptiveSelectionPolicy()
         self.strategy_discovery = StrategyDiscoveryEngine()
+        
+        # Initialize hypernetwork components if enabled
+        if use_hypernetwork:
+            # Feature extractor for diversity scoring
+            def feature_extractor(x):
+                with torch.no_grad():
+                    if hasattr(self.model, 'get_features'):
+                        return self.model.get_features(x)
+                    else:
+                        # Use model output as features
+                        return self.model(x)
+            
+            # Create scoring functions
+            self.scoring_functions = [
+                GradientMagnitudeScoring(self.model, self.device),
+                DiversityScoring(feature_extractor),
+                UncertaintyScoring(self.model, self.device),
+                BoundaryScoring(self.model, self.device),
+                InfluenceScoring(self.model, self.device),
+                ForgetScoring()
+            ]
+            
+            # Create hypernetwork with optimized settings for CIFAR10
+            self.hypernetwork = MultiScoringHypernetwork(
+                scoring_functions=self.scoring_functions,
+                state_dim=19,  # Matches HypernetTrainingState
+                hidden_dim=64,  # Reduced for faster training
+                attention_heads=2  # Reduced for efficiency
+            ).to(self.device)
+            
+            # Create selector
+            self.hypernet_selector = SubmodularMultiScoringSelector(
+                hypernetwork=self.hypernetwork,
+                scoring_functions=self.scoring_functions,
+                lazy_evaluation=True,  # Enable lazy evaluation for speed
+                cache_size=5000  # Smaller cache for CIFAR10
+            )
+            
+            # Hypernetwork optimizer
+            self.hypernet_optimizer = torch.optim.Adam(
+                self.hypernetwork.parameters(), 
+                lr=0.001  # Higher LR for faster convergence
+            )
+            
+            logger.info("Initialized hypernetwork-based multi-scoring selection")
         
         # Resource management
         self.memory_budget = memory_budget_mb * 1024 * 1024
@@ -1850,7 +1928,7 @@ class RLGuidedGaLoreSelector:
         self.epoch = 0
         self.total_selections = 0
         
-        logger.info(f"Initialized RL-Guided GaLore Selector with rank={rank}")
+        logger.info(f"Initialized RL-Guided GaLore Selector with rank={rank}, hypernetwork={use_hypernetwork}")
         
     @timing_decorator("select_coreset")
     def select_coreset(self, 
@@ -1891,8 +1969,18 @@ class RLGuidedGaLoreSelector:
         logger.info(f"Phase transition predictions for next 4 epochs: {phase_predictions.squeeze().tolist()}")
         
         # Select strategy based on weights
-        strategy_idx, _ = self.rl_policy.select_action(state_tensor, epsilon=0.1 if self.epoch < 100 else 0.05)
-        selected_strategy = list(SelectionStrategy)[strategy_idx]
+        # For CIFAR10, prioritize hypernetwork strategy for faster convergence
+        if self.use_hypernetwork and hasattr(self, 'hypernet_selector'):
+            # Use hypernetwork for first 30 epochs or every 5 epochs for exploration
+            if self.epoch < 30 or self.epoch % 5 == 0:
+                selected_strategy = SelectionStrategy.HYPERNETWORK
+                logger.info(f"Using hypernetwork strategy for epoch {self.epoch}")
+            else:
+                strategy_idx, _ = self.rl_policy.select_action(state_tensor, epsilon=0.1 if self.epoch < 100 else 0.05)
+                selected_strategy = list(SelectionStrategy)[strategy_idx]
+        else:
+            strategy_idx, _ = self.rl_policy.select_action(state_tensor, epsilon=0.1 if self.epoch < 100 else 0.05)
+            selected_strategy = list(SelectionStrategy)[strategy_idx]
         
         logger.info(f"Selected strategy: {selected_strategy.value}")
         
@@ -2133,6 +2221,64 @@ class RLGuidedGaLoreSelector:
                     except Exception as e:
                         logger.warning(f"Hybrid strategy computation failed for index {i}: {e}")
                         scores[i] = 0.0
+                        
+            elif strategy == SelectionStrategy.HYPERNETWORK:
+                # Use hypernetwork-based multi-scoring selection
+                if self.use_hypernetwork and hasattr(self, 'hypernet_selector'):
+                    # Create training state for hypernetwork
+                    try:
+                        # Get current performance metrics
+                        current_loss = self.performance_history[-1] if self.performance_history else 1.0
+                        current_acc = max(0.0, 1.0 - current_loss)  # Simple conversion
+                        
+                        # Compute gradient norm
+                        grad_norm = 0.0
+                        sample_grads = self._compute_sample_gradients(min(10, len(self.train_dataset)))
+                        if sample_grads:
+                            # Handle both tensor and numpy array cases
+                            grad_norms = []
+                            for g in sample_grads.values() if isinstance(sample_grads, dict) else sample_grads:
+                                if isinstance(g, torch.Tensor):
+                                    grad_norms.append(g.flatten().norm().item())
+                                elif hasattr(g, 'flatten'):
+                                    grad_norms.append(np.linalg.norm(g.flatten()))
+                            if grad_norms:
+                                grad_norm = np.mean(grad_norms)
+                        
+                        # Get class distribution (simplified for CIFAR10)
+                        class_dist = np.ones(10) / 10  # Uniform for simplicity
+                        
+                        # Create hypernetwork training state
+                        hypernet_state = HypernetTrainingState(
+                            epoch=self.epoch,
+                            loss=current_loss,
+                            accuracy=current_acc,
+                            gradient_norm=grad_norm,
+                            learning_rate=0.001,  # Default LR
+                            data_seen_ratio=self.epoch / 100.0,  # Assume 100 epochs max
+                            class_distribution=class_dist,
+                            performance_history=self.performance_history[-10:] if len(self.performance_history) >= 10 else [0.0] * 10,
+                            selection_diversity=0.5  # Placeholder
+                        )
+                        
+                        # Use hypernetwork selector
+                        selected_indices, selection_info = self.hypernet_selector.select_coreset_greedy(
+                            dataset=self.train_dataset,
+                            budget=budget,
+                            training_state=hypernet_state,
+                            context={'sample_losses': {}},  # Can add sample losses if available
+                            verbose=False  # Less verbose for integration
+                        )
+                        
+                        logger.info(f"Hypernetwork selection completed with weights: {selection_info['weights']}")
+                        return selected_indices
+                        
+                    except Exception as e:
+                        logger.warning(f"Hypernetwork selection failed: {e}, falling back to gradient magnitude")
+                        return self._select_with_strategy(SelectionStrategy.GRADIENT_MAGNITUDE, budget)
+                else:
+                    logger.warning("Hypernetwork not initialized, falling back to gradient magnitude")
+                    return self._select_with_strategy(SelectionStrategy.GRADIENT_MAGNITUDE, budget)
             
             # Select top-k based on scores
             selected_indices = np.argsort(scores)[-budget:].tolist()
@@ -2329,7 +2475,7 @@ def plot_phase_transitions(selector: RLGuidedGaLoreSelector):
 
 @timing_decorator("run_cifar_experiments")
 def run_cifar_experiments(experiment_type: str = "all", 
-                          data_dir: str = "/Users/tanmoy/research/data",
+                          data_dir: str = "/Users/mukher74/research/data",
                           device: str = "cuda" if torch.cuda.is_available() else "mps",
                           config_args=None):
     """
@@ -2404,7 +2550,8 @@ def run_cifar10_experiments(data_dir: str, device: str, config_args=None):
             train_dataset=variation_data['train'],
             val_dataset=variation_data['test'],
             memory_budget_mb=config_args.memory_budget_mb if config_args else 1000,
-            rank=config_args.rank if config_args else 256
+            rank=config_args.rank if config_args else 256,
+            use_hypernetwork=config_args.use_hypernetwork if config_args and hasattr(config_args, 'use_hypernetwork') else True
         )
         
         # Run experiment
@@ -2461,7 +2608,8 @@ def run_cifar100_experiments(data_dir: str, device: str, config_args=None):
             train_dataset=variation_data['train'],
             val_dataset=variation_data['test'],
             memory_budget_mb=config_args.memory_budget_mb if config_args else 1000,
-            rank=config_args.rank if config_args else 256
+            rank=config_args.rank if config_args else 256,
+            use_hypernetwork=config_args.use_hypernetwork if config_args and hasattr(config_args, 'use_hypernetwork') else True
         )
         
         # Run experiment
@@ -2539,7 +2687,8 @@ def run_corruption_experiments(data_dir: str, device: str, config_args=None):
                 train_dataset=corrupted_train,
                 val_dataset=cifar10_test,
                 memory_budget_mb=config_args.memory_budget_mb if config_args else 1000,
-                rank=config_args.rank if config_args else 256
+                rank=config_args.rank if config_args else 256,
+                use_hypernetwork=config_args.use_hypernetwork if config_args and hasattr(config_args, 'use_hypernetwork') else True
             )
             
             # Run experiment
@@ -2587,7 +2736,8 @@ def run_corruption_experiments(data_dir: str, device: str, config_args=None):
                 train_dataset=corrupted_train,
                 val_dataset=cifar100_test,
                 memory_budget_mb=config_args.memory_budget_mb if config_args else 1000,
-                rank=config_args.rank if config_args else 256
+                rank=config_args.rank if config_args else 256,
+                use_hypernetwork=config_args.use_hypernetwork if config_args and hasattr(config_args, 'use_hypernetwork') else True
             )
             
             # Run experiment
