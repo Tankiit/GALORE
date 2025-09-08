@@ -1,0 +1,30 @@
+{
+  "model": "gpt2",
+  "dataset": "wikitext103_quality_stratified",
+  "config": {
+    "model": "gpt2",
+    "dataset": "wikitext103_quality_stratified",
+    "max_samples": 300,
+    "epochs": 2,
+    "batch_size": 2,
+    "coreset_budget": 50,
+    "use_hypernetwork": true
+  },
+  "results": {
+    "best_perplexity": 2.792240784427802,
+    "final_perplexity": 2.792240784427802,
+    "train_losses": [
+      6.008273859024047,
+      0.9290760791301728
+    ],
+    "val_perplexities": [
+      6.013052274381099,
+      2.792240784427802
+    ],
+    "training_times": [
+      4.68483304977417,
+      4.31113076210022
+    ]
+  },
+  "tensorboard_log_dir": "tensorboard_logs/llm_gpt2_wikitext103_quality_stratified/20250901_145000"
+}

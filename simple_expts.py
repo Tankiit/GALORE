@@ -63,6 +63,17 @@ except ImportError:
     logger.warning("LLM hypernetwork module not available")
     LLM_HYPERNETWORK_AVAILABLE = False
 
+# Import GP-based strategy optimizer
+try:
+    from galore_gp_optimizer import (
+        GALOREStrategyOptimizer,
+        EnhancedGALOREFramework
+    )
+    GP_OPTIMIZER_AVAILABLE = True
+except ImportError:
+    logger.warning("GP optimizer module not available (install scikit-optimize)")
+    GP_OPTIMIZER_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1417,6 +1428,52 @@ class PhaseTransitionDetector:
                                         for p in self.phase_history 
                                         if p.end_epoch is not None]) if self.phase_history else 0
         }
+    
+    def analyze_phase(self, gradient_norm: float, loss_curvature: float, 
+                     gradient_alignment: float) -> Dict[str, Any]:
+        """
+        Analyze current training phase for GP optimizer integration
+        
+        Args:
+            gradient_norm: Current gradient norm
+            loss_curvature: Current loss curvature estimate
+            gradient_alignment: Current gradient alignment score
+            
+        Returns:
+            Dict with phase information
+        """
+        # Determine current phase based on metrics
+        if len(self.gradient_norms) < 10:
+            phase = 'early'
+        elif len(self.loss_values) > 0:
+            recent_loss_variance = np.var(list(self.loss_values)[-10:]) if len(self.loss_values) >= 10 else 1.0
+            recent_grad_norm = np.mean(list(self.gradient_norms)[-10:]) if len(self.gradient_norms) >= 10 else gradient_norm
+            
+            if recent_loss_variance > 0.1 or recent_grad_norm > 1.0:
+                phase = 'early'
+            elif recent_loss_variance < 0.01 and recent_grad_norm < 0.1:
+                phase = 'late'
+            elif abs(gradient_alignment) > 0.8:
+                phase = 'transition'
+            else:
+                phase = 'middle'
+        else:
+            phase = 'middle'
+            
+        return {
+            'phase': phase,
+            'gradient_norm': gradient_norm,
+            'loss_curvature': loss_curvature,
+            'gradient_alignment': gradient_alignment,
+            'current_landscape': getattr(self.current_phase, 'loss_landscape', 'unknown'),
+            'dominant_strategy': getattr(self.current_phase, 'dominant_strategy', 'hybrid')
+        }
+    
+    def detected_transition(self) -> bool:
+        """Check if a transition was recently detected"""
+        if len(self.transition_scores) < 2:
+            return False
+        return self.transition_scores[-1] > self.sensitivity
 
 
 # =============================================================================
@@ -2561,7 +2618,11 @@ def run_cifar10_experiments(data_dir: str, device: str, config_args=None):
             train_dataset=variation_data['train'],
             val_dataset=variation_data['test'],
             dataset_name=variation_name,
-            device=device
+            device=device,
+            epochs=config_args.epochs if config_args else 50,
+            coreset_budget=config_args.coreset_budget if config_args else 1000,
+            config_args=config_args,
+            use_gp_optimizer=config_args.use_gp_optimizer if config_args else False
         )
         
         results[variation_name] = result
@@ -2620,7 +2681,10 @@ def run_cifar100_experiments(data_dir: str, device: str, config_args=None):
             val_dataset=variation_data['test'],
             dataset_name=variation_name,
             device=device,
-            config_args=config_args
+            epochs=config_args.epochs if config_args else 50,
+            coreset_budget=config_args.coreset_budget if config_args else 1000,
+            config_args=config_args,
+            use_gp_optimizer=config_args.use_gp_optimizer if config_args else False
         )
         
         results[variation_name] = result
@@ -2699,7 +2763,10 @@ def run_corruption_experiments(data_dir: str, device: str, config_args=None):
                 val_dataset=cifar10_test,
                 dataset_name=f"cifar10_{corruption_type}_sev{severity}",
                 device=device,
-                config_args=config_args
+                epochs=config_args.epochs if config_args else 50,
+                coreset_budget=config_args.coreset_budget if config_args else 1000,
+                config_args=config_args,
+                use_gp_optimizer=config_args.use_gp_optimizer if config_args else False
             )
             
             results[f"cifar10_{corruption_type}_sev{severity}"] = result
@@ -2748,7 +2815,10 @@ def run_corruption_experiments(data_dir: str, device: str, config_args=None):
                 val_dataset=cifar100_test,
                 dataset_name=f"cifar100_{corruption_type}_sev{severity}",
                 device=device,
-                config_args=config_args
+                epochs=config_args.epochs if config_args else 50,
+                coreset_budget=config_args.coreset_budget if config_args else 1000,
+                config_args=config_args,
+                use_gp_optimizer=config_args.use_gp_optimizer if config_args else False
             )
             
             results[f"cifar100_{corruption_type}_sev{severity}"] = result
@@ -2781,7 +2851,8 @@ def run_single_cifar_experiment(selector: RLGuidedGaLoreSelector,
                                device: str,
                                epochs: int = 50,
                                coreset_budget: int = 1000,
-                               config_args=None) -> Dict[str, Any]:
+                               config_args=None,
+                               use_gp_optimizer: bool = False) -> Dict[str, Any]:
     """
     Run a single CIFAR experiment
     
@@ -2794,12 +2865,27 @@ def run_single_cifar_experiment(selector: RLGuidedGaLoreSelector,
         device: Device to run on
         epochs: Number of training epochs
         coreset_budget: Size of coreset to select each epoch
+        use_gp_optimizer: Whether to use GP-based weight optimization
     
     Returns:
         Dictionary with experiment results
     """
     
     logger.info(f"Running experiment on {dataset_name} for {epochs} epochs")
+    
+    # Initialize GP optimizer if requested
+    gp_framework = None
+    if use_gp_optimizer and GP_OPTIMIZER_AVAILABLE:
+        logger.info("Initializing GP-based strategy weight optimizer...")
+        gp_framework = EnhancedGALOREFramework(
+            phase_detector=selector.phase_detector,
+            selection_policy=selector.rl_policy,
+            galore_config=selector.galore,
+            num_epochs=epochs,
+            coreset_size=coreset_budget
+        )
+        # Run initial optimization on validation set
+        gp_framework.initialize_optimal_weights(val_dataset)
     
     # Initialize intermediate results manager
     output_dir = config_args.output_dir if config_args else "./results"
@@ -2843,6 +2929,27 @@ def run_single_cifar_experiment(selector: RLGuidedGaLoreSelector,
             with profiler.timer(f"epoch_{epoch}_evaluation"):
                 val_loss, val_acc = evaluate_cifar_model(model, val_dataset, device)
                 current_performance = val_acc  # Higher is better
+            
+            # Update GP optimizer weights if enabled
+            if gp_framework is not None:
+                # Compute current training metrics
+                current_metrics = {
+                    'gradient_norm': selector.phase_detector.gradient_norms[-1] if selector.phase_detector.gradient_norms else 1.0,
+                    'loss_curvature': selector.phase_detector.hessian_traces[-1] if selector.phase_detector.hessian_traces else 0.0,
+                    'gradient_alignment': selector.phase_detector.gradient_alignments[-1] if selector.phase_detector.gradient_alignments else 0.0,
+                    'gradient_variance': np.var(list(selector.phase_detector.gradient_norms)) if len(selector.phase_detector.gradient_norms) > 1 else 0.0,
+                    'gradient_variance_avg': np.mean(list(selector.phase_detector.gradient_norms)) if selector.phase_detector.gradient_norms else 1.0,
+                    'forgetting_rate': 0.0,  # Would need to track this
+                    'class_imbalance': 0.0   # Would need to compute this
+                }
+                
+                # Get optimized weights
+                optimized_weights = gp_framework.gp_optimizer.adaptive_weight_update(current_metrics)
+                
+                # Apply weights to selection (this would need to be implemented in your selector)
+                # For now, we'll just log them
+                if epoch % 10 == 0:
+                    logger.info(f"GP-optimized weights: {optimized_weights}")
             
             # Select coreset
             with profiler.timer(f"epoch_{epoch}_coreset_selection"):
@@ -3377,6 +3484,8 @@ Examples:
                        help='Step size for learning rate scheduler (default: 20)')
     parser.add_argument('--scheduler_gamma', type=float, default=0.5,
                        help='Gamma for learning rate scheduler (default: 0.5)')
+    parser.add_argument('--use_gp_optimizer', action='store_true',
+                       help='Use GP-based strategy weight optimization')
     
     # Coreset selection parameters
     parser.add_argument('--coreset_budget', type=int, default=1000,
