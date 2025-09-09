@@ -74,6 +74,18 @@ except ImportError:
     logger.warning("GP optimizer module not available (install scikit-optimize)")
     GP_OPTIMIZER_AVAILABLE = False
 
+# Import MDP-based dataset selector with Bloom filtering
+try:
+    from bloom_mdp_selector import (
+        DatasetSelectorMDP,
+        GALOREMDPIntegration,
+        SelectionStrategy as MDPStrategy
+    )
+    MDP_SELECTOR_AVAILABLE = True
+except ImportError:
+    logger.warning("MDP selector module not available")
+    MDP_SELECTOR_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1063,6 +1075,19 @@ class CIFARResNet(nn.Module):
         x = self.fc(x)
         
         return x
+    
+    def extract_features(self, x):
+        """Extract features before the final classification layer"""
+        x = F.relu(self.bn1(self.conv1(x)))
+        
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        
+        return x  # Return features before FC layer
 
 
 class ResidualBlock(nn.Module):
@@ -1905,12 +1930,14 @@ class RLGuidedGaLoreSelector:
                  val_dataset: Dataset,
                  memory_budget_mb: int = 1000,
                  rank: int = 256,
-                 use_hypernetwork: bool = True):
+                 use_hypernetwork: bool = True,
+                 use_mdp_selector: bool = False):
         
         self.model = model
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.use_hypernetwork = use_hypernetwork
+        self.use_mdp_selector = use_mdp_selector
         
         # Get device safely
         try:
@@ -1971,6 +1998,26 @@ class RLGuidedGaLoreSelector:
             
             logger.info("Initialized hypernetwork-based multi-scoring selection")
         
+        # Initialize MDP selector if enabled
+        self.mdp_integration = None
+        if use_mdp_selector and MDP_SELECTOR_AVAILABLE:
+            # Determine feature dimension based on model
+            if hasattr(model, 'fc'):
+                feature_dim = model.fc.in_features
+            elif hasattr(model, 'classifier'):
+                if isinstance(model.classifier, nn.Sequential):
+                    feature_dim = model.classifier[0].in_features
+                else:
+                    feature_dim = model.classifier.in_features
+            else:
+                feature_dim = 512  # Default
+            
+            self.mdp_integration = GALOREMDPIntegration(
+                dataset_size=len(train_dataset),
+                feature_dim=feature_dim
+            )
+            logger.info(f"Initialized MDP selector with feature_dim={feature_dim}, dataset_size={len(train_dataset)}")
+        
         # Resource management
         self.memory_budget = memory_budget_mb * 1024 * 1024
         self.current_memory = 0
@@ -2025,28 +2072,54 @@ class RLGuidedGaLoreSelector:
         # Log phase predictions
         logger.info(f"Phase transition predictions for next 4 epochs: {phase_predictions.squeeze().tolist()}")
         
-        # Select strategy based on weights
-        # For CIFAR10, prioritize hypernetwork strategy for faster convergence
-        if self.use_hypernetwork and hasattr(self, 'hypernet_selector'):
-            # Use hypernetwork for first 30 epochs or every 5 epochs for exploration
-            if self.epoch < 30 or self.epoch % 5 == 0:
-                selected_strategy = SelectionStrategy.HYPERNETWORK
-                logger.info(f"Using hypernetwork strategy for epoch {self.epoch}")
+        # Use MDP selector if enabled
+        if self.use_mdp_selector and self.mdp_integration is not None:
+            # Extract features for MDP selection
+            performance_metrics = {
+                'accuracy': current_performance,
+                'loss': 2.0 - current_performance  # Rough inverse relationship
+            }
+            
+            # Select using MDP
+            selected_indices, mdp_strategy = self.mdp_integration.select_coreset(
+                self.model, self.train_dataset, budget, performance_metrics
+            )
+            
+            # Map MDP strategy to our SelectionStrategy enum
+            mdp_strategy_map = {
+                'π_explore': SelectionStrategy.DIVERSITY,
+                'π_exploit': SelectionStrategy.GRADIENT_MAGNITUDE,
+                'π_refresh': SelectionStrategy.RANDOM,
+                'π_balance': SelectionStrategy.HYBRID,
+                'π_focus': SelectionStrategy.UNCERTAINTY
+            }
+            selected_strategy = mdp_strategy_map.get(mdp_strategy.value, SelectionStrategy.HYBRID)
+            
+            logger.info(f"MDP selected strategy: {mdp_strategy.value} -> {selected_strategy.value}")
+            
+        else:
+            # Select strategy based on weights
+            # For CIFAR10, prioritize hypernetwork strategy for faster convergence
+            if self.use_hypernetwork and hasattr(self, 'hypernet_selector'):
+                # Use hypernetwork for first 30 epochs or every 5 epochs for exploration
+                if self.epoch < 30 or self.epoch % 5 == 0:
+                    selected_strategy = SelectionStrategy.HYPERNETWORK
+                    logger.info(f"Using hypernetwork strategy for epoch {self.epoch}")
+                else:
+                    strategy_idx, _ = self.rl_policy.select_action(state_tensor, epsilon=0.1 if self.epoch < 100 else 0.05)
+                    selected_strategy = list(SelectionStrategy)[strategy_idx]
             else:
                 strategy_idx, _ = self.rl_policy.select_action(state_tensor, epsilon=0.1 if self.epoch < 100 else 0.05)
                 selected_strategy = list(SelectionStrategy)[strategy_idx]
-        else:
-            strategy_idx, _ = self.rl_policy.select_action(state_tensor, epsilon=0.1 if self.epoch < 100 else 0.05)
-            selected_strategy = list(SelectionStrategy)[strategy_idx]
-        
-        logger.info(f"Selected strategy: {selected_strategy.value}")
-        
-        # Perform selection using chosen strategy
-        if selected_strategy == SelectionStrategy.HYBRID:
-            # Use compositional strategy from discovery engine
-            selected_indices = self._select_with_composed_strategy(budget)
-        else:
-            selected_indices = self._select_with_strategy(selected_strategy, budget)
+            
+            logger.info(f"Selected strategy: {selected_strategy.value}")
+            
+            # Perform selection using chosen strategy
+            if selected_strategy == SelectionStrategy.HYBRID:
+                # Use compositional strategy from discovery engine
+                selected_indices = self._select_with_composed_strategy(budget)
+            else:
+                selected_indices = self._select_with_strategy(selected_strategy, budget)
             
         # Update histories
         self.selection_history.extend(selected_indices)
@@ -2608,7 +2681,8 @@ def run_cifar10_experiments(data_dir: str, device: str, config_args=None):
             val_dataset=variation_data['test'],
             memory_budget_mb=config_args.memory_budget_mb if config_args else 1000,
             rank=config_args.rank if config_args else 256,
-            use_hypernetwork=config_args.use_hypernetwork if config_args and hasattr(config_args, 'use_hypernetwork') else True
+            use_hypernetwork=config_args.use_hypernetwork if config_args and hasattr(config_args, 'use_hypernetwork') else True,
+            use_mdp_selector=config_args.use_mdp_selector if config_args and hasattr(config_args, 'use_mdp_selector') else False
         )
         
         # Run experiment
@@ -2670,7 +2744,8 @@ def run_cifar100_experiments(data_dir: str, device: str, config_args=None):
             val_dataset=variation_data['test'],
             memory_budget_mb=config_args.memory_budget_mb if config_args else 1000,
             rank=config_args.rank if config_args else 256,
-            use_hypernetwork=config_args.use_hypernetwork if config_args and hasattr(config_args, 'use_hypernetwork') else True
+            use_hypernetwork=config_args.use_hypernetwork if config_args and hasattr(config_args, 'use_hypernetwork') else True,
+            use_mdp_selector=config_args.use_mdp_selector if config_args and hasattr(config_args, 'use_mdp_selector') else False
         )
         
         # Run experiment
@@ -2752,7 +2827,8 @@ def run_corruption_experiments(data_dir: str, device: str, config_args=None):
                 val_dataset=cifar10_test,
                 memory_budget_mb=config_args.memory_budget_mb if config_args else 1000,
                 rank=config_args.rank if config_args else 256,
-                use_hypernetwork=config_args.use_hypernetwork if config_args and hasattr(config_args, 'use_hypernetwork') else True
+                use_hypernetwork=config_args.use_hypernetwork if config_args and hasattr(config_args, 'use_hypernetwork') else True,
+                use_mdp_selector=config_args.use_mdp_selector if config_args and hasattr(config_args, 'use_mdp_selector') else False
             )
             
             # Run experiment
@@ -2804,7 +2880,8 @@ def run_corruption_experiments(data_dir: str, device: str, config_args=None):
                 val_dataset=cifar100_test,
                 memory_budget_mb=config_args.memory_budget_mb if config_args else 1000,
                 rank=config_args.rank if config_args else 256,
-                use_hypernetwork=config_args.use_hypernetwork if config_args and hasattr(config_args, 'use_hypernetwork') else True
+                use_hypernetwork=config_args.use_hypernetwork if config_args and hasattr(config_args, 'use_hypernetwork') else True,
+                use_mdp_selector=config_args.use_mdp_selector if config_args and hasattr(config_args, 'use_mdp_selector') else False
             )
             
             # Run experiment
@@ -3486,6 +3563,8 @@ Examples:
                        help='Gamma for learning rate scheduler (default: 0.5)')
     parser.add_argument('--use_gp_optimizer', action='store_true',
                        help='Use GP-based strategy weight optimization')
+    parser.add_argument('--use_mdp_selector', action='store_true',
+                       help='Use MDP-based dataset selection with Bloom filtering')
     
     # Coreset selection parameters
     parser.add_argument('--coreset_budget', type=int, default=1000,
