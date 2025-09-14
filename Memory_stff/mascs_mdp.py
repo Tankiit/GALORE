@@ -16,10 +16,20 @@ import warnings
 import random
 from typing import Dict, List, Tuple, Optional
 import json
+import pickle
+from datetime import datetime
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+import glob
+from pathlib import Path
 from skopt import gp_minimize
 from skopt.space import Real
 from skopt.utils import use_named_args
 warnings.filterwarnings('ignore')
+plt.style.use('seaborn-v0_8')
+sns.set_palette("husl")
 
 
 class GPStrategyWeightOptimizer:
@@ -95,7 +105,6 @@ class GPStrategyWeightOptimizer:
         for strategy in strategies:
             if verbose:
                 print(f"Optimizing weights for strategy: {strategy}")
-            
             # Reset history for this strategy
             self.history = defaultdict(list)
             self.best_performance = -np.inf
@@ -150,7 +159,7 @@ class GPStrategyWeightOptimizer:
             
             if verbose:
                 print(f"Best weights for {strategy}: {self.format_weights(strategy_weights[strategy])}")
-        
+                
         return strategy_weights
     
     def format_weights(self, weights_dict):
@@ -229,8 +238,8 @@ class MemoryAugmentedCoresetSelector:
         Optimize strategy weights using GP-based Bayesian optimization
         """
         if verbose:
-            print("Optimizing strategy weights using Gaussian Process...")
-        
+            print("Starting strategy weight optimization...")
+            
         # Define validation function for GP optimizer
         def validation_fn(weights_dict, model_ref, dataset_ref, budget_ref):
             # Create a temporary strategy with these weights
@@ -296,12 +305,9 @@ class MemoryAugmentedCoresetSelector:
         self.strategies.update(optimized_weights)
         
         if verbose:
-            print("Strategy weight optimization complete!")
-            for strategy, weights in optimized_weights.items():
-                print(f"{strategy}: {self.gp_optimizer.format_weights(weights)}")
-        
+            print("Strategy weight optimization completed.")
         return optimized_weights
-        
+    
     def encode_state(self, performance_metrics: Dict, memory_stats: Dict) -> torch.Tensor:
         """Encode current state for MDP policy"""
         state_features = []
@@ -724,6 +730,512 @@ class ValueNetwork(nn.Module):
         return self.network(state)
 
 
+class IntermediateTracker:
+    """Track intermediate results and strategy performance across experiments"""
+    
+    def __init__(self, save_dir: str):
+        self.save_dir = save_dir
+        self.strategy_performance = []
+        self.epoch_data = []
+        self.experiment_metadata = {}
+        os.makedirs(save_dir, exist_ok=True)
+    
+    def log_epoch(self, experiment_key: str, epoch: int, data: dict):
+        """Log data for a specific epoch"""
+        epoch_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'experiment_key': experiment_key,
+            'epoch': epoch,
+            **data
+        }
+        self.epoch_data.append(epoch_entry)
+    
+    def log_strategy_performance(self, experiment_key: str, epoch: int, 
+                               strategy: str, reward: float, metrics: dict):
+        """Log strategy performance"""
+        entry = {
+            'timestamp': datetime.now().isoformat(),
+            'experiment_key': experiment_key,
+            'epoch': epoch,
+            'strategy': strategy,
+            'reward': reward,
+            **metrics
+        }
+        self.strategy_performance.append(entry)
+    
+    def save_intermediate(self, experiment_key: str):
+        """Save intermediate tracking data"""
+        # Save strategy performance as CSV
+        if self.strategy_performance:
+            df_strategy = pd.DataFrame(self.strategy_performance)
+            strategy_file = os.path.join(self.save_dir, f'strategy_performance_{experiment_key}.csv')
+            df_strategy.to_csv(strategy_file, index=False)
+        
+        # Save epoch data as CSV
+        if self.epoch_data:
+            df_epochs = pd.DataFrame(self.epoch_data)
+            epochs_file = os.path.join(self.save_dir, f'epoch_data_{experiment_key}.csv')
+            df_epochs.to_csv(epochs_file, index=False)
+        
+        # Save raw data as pickle for quick loading
+        tracker_data = {
+            'strategy_performance': self.strategy_performance,
+            'epoch_data': self.epoch_data,
+            'experiment_metadata': self.experiment_metadata
+        }
+        pickle_file = os.path.join(self.save_dir, f'tracker_data_{experiment_key}.pkl')
+        with open(pickle_file, 'wb') as f:
+            pickle.dump(tracker_data, f)
+    
+    def load_intermediate(self, load_dir: str):
+        """Load previous intermediate data"""
+        if not os.path.exists(load_dir):
+            return
+        
+        # Load all pickle files in the directory
+        for filename in os.listdir(load_dir):
+            if filename.endswith('.pkl') and filename.startswith('tracker_data_'):
+                filepath = os.path.join(load_dir, filename)
+                try:
+                    with open(filepath, 'rb') as f:
+                        data = pickle.load(f)
+                        self.strategy_performance.extend(data.get('strategy_performance', []))
+                        self.epoch_data.extend(data.get('epoch_data', []))
+                        self.experiment_metadata.update(data.get('experiment_metadata', {}))
+                    print(f"Loaded intermediate data from {filename}")
+                except Exception as e:
+                    print(f"Error loading {filename}: {e}")
+    
+    def analyze_strategy_effectiveness(self):
+        """Analyze which strategies work best for different settings"""
+        if not self.strategy_performance:
+            print("No strategy data to analyze")
+            return
+        
+        df = pd.DataFrame(self.strategy_performance)
+        
+        # Strategy effectiveness by dataset/architecture
+        print("\n" + "="*60)
+        print("STRATEGY EFFECTIVENESS ANALYSIS")
+        print("="*60)
+        
+        # Overall strategy performance
+        strategy_stats = df.groupby('strategy')['reward'].agg(['mean', 'std', 'count'])
+        strategy_stats = strategy_stats.sort_values('mean', ascending=False)
+        print("\nOverall Strategy Performance (by average reward):")
+        print(strategy_stats)
+        
+        # Strategy performance by experiment type
+        if 'experiment_key' in df.columns:
+            print("\nStrategy Performance by Experiment:")
+            experiment_stats = df.groupby(['experiment_key', 'strategy'])['reward'].mean().unstack(fill_value=0)
+            print(experiment_stats)
+        
+        # Best strategy per experiment
+        best_strategies = df.loc[df.groupby('experiment_key')['reward'].idxmax()]
+        print("\nBest Strategy per Experiment:")
+        for _, row in best_strategies.iterrows():
+            print(f"{row['experiment_key']}: {row['strategy']} (reward: {row['reward']:.4f})")
+        
+        return strategy_stats, experiment_stats, best_strategies
+
+
+def save_strategy_weights(selector, experiment_key: str, epoch: int, save_dir: str):
+    """Save current strategy weights to file"""
+    weights_data = {
+        'timestamp': datetime.now().isoformat(),
+        'experiment_key': experiment_key,
+        'epoch': epoch,
+        'strategies': selector.strategies
+    }
+    
+    os.makedirs(save_dir, exist_ok=True)
+    weights_file = os.path.join(save_dir, f'strategy_weights_{experiment_key}_epoch_{epoch}.json')
+    with open(weights_file, 'w') as f:
+        json.dump(weights_data, f, indent=2)
+
+
+def load_strategy_weights(load_path: str):
+    """Load strategy weights from file"""
+    try:
+        with open(load_path, 'r') as f:
+            data = json.load(f)
+        return data['strategies']
+    except Exception as e:
+        print(f"Error loading strategy weights from {load_path}: {e}")
+        return None
+
+
+class TensorBoardAnalyzer:
+    """Analyze TensorBoard logs and create comprehensive plots"""
+    
+    def __init__(self, log_dir: str, output_dir: str = './plots'):
+        self.log_dir = log_dir
+        self.output_dir = output_dir
+        self.data = {}
+        os.makedirs(output_dir, exist_ok=True)
+    
+    def extract_tensorboard_data(self):
+        """Extract all data from TensorBoard event files"""
+        log_dirs = glob.glob(os.path.join(self.log_dir, "*"))
+        
+        for log_path in log_dirs:
+            if os.path.isdir(log_path):
+                experiment_name = os.path.basename(log_path)
+                print(f"Processing {experiment_name}...")
+                
+                try:
+                    ea = EventAccumulator(log_path)
+                    ea.Reload()
+                    
+                    # Extract scalar data
+                    scalar_data = {}
+                    for tag in ea.Tags()['scalars']:
+                        scalar_events = ea.Scalars(tag)
+                        scalar_data[tag] = {
+                            'steps': [s.step for s in scalar_events],
+                            'values': [s.value for s in scalar_events],
+                            'wall_times': [s.wall_time for s in scalar_events]
+                        }
+                    
+                    # Extract histogram data
+                    histogram_data = {}
+                    for tag in ea.Tags()['histograms']:
+                        hist_events = ea.Histograms(tag)
+                        histogram_data[tag] = []
+                        for hist in hist_events:
+                            histogram_data[tag].append({
+                                'step': hist.step,
+                                'min': hist.histogram_value.min,
+                                'max': hist.histogram_value.max,
+                                'sum': hist.histogram_value.sum,
+                                'count': hist.histogram_value.bucket_limit[-1] if hist.histogram_value.bucket_limit else 0
+                            })
+                    
+                    self.data[experiment_name] = {
+                        'scalars': scalar_data,
+                        'histograms': histogram_data
+                    }
+                    
+                except Exception as e:
+                    print(f"Error processing {log_path}: {e}")
+        
+        print(f"Extracted data from {len(self.data)} experiments")
+    
+    def create_training_curves(self, save_plots=True):
+        """Create training/validation curves for all experiments"""
+        if not self.data:
+            print("No data loaded. Run extract_tensorboard_data() first.")
+            return
+        
+        # Training curves
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle('Training Curves Across All Experiments', fontsize=16)
+        
+        for exp_name, exp_data in self.data.items():
+            scalars = exp_data['scalars']
+            
+            # Training Loss
+            if 'Training/Loss' in scalars:
+                steps = scalars['Training/Loss']['steps']
+                values = scalars['Training/Loss']['values']
+                axes[0, 0].plot(steps, values, label=exp_name, alpha=0.7)
+            
+            # Training Accuracy
+            if 'Training/Accuracy' in scalars:
+                steps = scalars['Training/Accuracy']['steps']
+                values = scalars['Training/Accuracy']['values']
+                axes[0, 1].plot(steps, values, label=exp_name, alpha=0.7)
+            
+            # Test Loss
+            if 'Testing/Loss' in scalars:
+                steps = scalars['Testing/Loss']['steps']
+                values = scalars['Testing/Loss']['values']
+                axes[1, 0].plot(steps, values, label=exp_name, alpha=0.7)
+            
+            # Test Accuracy
+            if 'Testing/Accuracy' in scalars:
+                steps = scalars['Testing/Accuracy']['steps']
+                values = scalars['Testing/Accuracy']['values']
+                axes[1, 1].plot(steps, values, label=exp_name, alpha=0.7)
+        
+        axes[0, 0].set_title('Training Loss')
+        axes[0, 0].set_xlabel('Epoch')
+        axes[0, 0].set_ylabel('Loss')
+        axes[0, 0].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        axes[0, 1].set_title('Training Accuracy')
+        axes[0, 1].set_xlabel('Epoch')
+        axes[0, 1].set_ylabel('Accuracy (%)')
+        axes[0, 1].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        axes[1, 0].set_title('Test Loss')
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Loss')
+        axes[1, 0].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        axes[1, 1].set_title('Test Accuracy')
+        axes[1, 1].set_xlabel('Epoch')
+        axes[1, 1].set_ylabel('Accuracy (%)')
+        axes[1, 1].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        if save_plots:
+            plt.savefig(os.path.join(self.output_dir, 'training_curves.png'), dpi=300, bbox_inches='tight')
+        plt.show()
+    
+    def create_strategy_analysis(self, save_plots=True):
+        """Create strategy performance analysis plots"""
+        if not self.data:
+            print("No data loaded. Run extract_tensorboard_data() first.")
+            return
+        
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle('Strategy Performance Analysis', fontsize=16)
+        
+        # Strategy rewards over time
+        for exp_name, exp_data in self.data.items():
+            scalars = exp_data['scalars']
+            if 'Strategy/Reward' in scalars:
+                steps = scalars['Strategy/Reward']['steps']
+                values = scalars['Strategy/Reward']['values']
+                axes[0, 0].plot(steps, values, label=exp_name, alpha=0.7)
+        
+        axes[0, 0].set_title('Strategy Rewards Over Time')
+        axes[0, 0].set_xlabel('Epoch')
+        axes[0, 0].set_ylabel('Reward')
+        axes[0, 0].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # Strategy action distribution
+        all_actions = []
+        all_experiments = []
+        strategy_names = ['explore', 'exploit', 'refresh', 'balance', 'focus']
+        
+        for exp_name, exp_data in self.data.items():
+            scalars = exp_data['scalars']
+            if 'Strategy/Action' in scalars:
+                actions = scalars['Strategy/Action']['values']
+                all_actions.extend(actions)
+                all_experiments.extend([exp_name] * len(actions))
+        
+        if all_actions:
+            action_df = pd.DataFrame({
+                'Action': [strategy_names[int(a)] if int(a) < len(strategy_names) else f'Action_{int(a)}' for a in all_actions],
+                'Experiment': all_experiments
+            })
+            
+            # Strategy distribution per experiment
+            strategy_counts = action_df.groupby(['Experiment', 'Action']).size().unstack(fill_value=0)
+            strategy_counts.plot(kind='bar', stacked=True, ax=axes[0, 1])
+            axes[0, 1].set_title('Strategy Usage Distribution')
+            axes[0, 1].set_xlabel('Experiment')
+            axes[0, 1].set_ylabel('Count')
+            axes[0, 1].legend(title='Strategy')
+            
+            # Overall strategy popularity
+            overall_counts = action_df['Action'].value_counts()
+            axes[1, 0].pie(overall_counts.values, labels=overall_counts.index, autopct='%1.1f%%')
+            axes[1, 0].set_title('Overall Strategy Popularity')
+        
+        # Average final accuracy by experiment
+        final_accuracies = {}
+        for exp_name, exp_data in self.data.items():
+            scalars = exp_data['scalars']
+            if 'Testing/Accuracy' in scalars and scalars['Testing/Accuracy']['values']:
+                final_accuracies[exp_name] = scalars['Testing/Accuracy']['values'][-1]
+        
+        if final_accuracies:
+            exp_names = list(final_accuracies.keys())
+            accuracies = list(final_accuracies.values())
+            axes[1, 1].bar(exp_names, accuracies)
+            axes[1, 1].set_title('Final Test Accuracies')
+            axes[1, 1].set_xlabel('Experiment')
+            axes[1, 1].set_ylabel('Accuracy (%)')
+            axes[1, 1].tick_params(axis='x', rotation=45)
+        
+        plt.tight_layout()
+        if save_plots:
+            plt.savefig(os.path.join(self.output_dir, 'strategy_analysis.png'), dpi=300, bbox_inches='tight')
+        plt.show()
+    
+    def create_score_distribution_plots(self, save_plots=True):
+        """Create plots showing score distributions across experiments"""
+        if not self.data:
+            print("No data loaded. Run extract_tensorboard_data() first.")
+            return
+        
+        # Find all score types
+        score_types = set()
+        for exp_data in self.data.values():
+            histograms = exp_data['histograms']
+            for tag in histograms.keys():
+                if tag.startswith('Scores/'):
+                    score_types.add(tag.split('/')[-1])
+        
+        if not score_types:
+            print("No score histogram data found")
+            return
+        
+        n_scores = len(score_types)
+        n_cols = 3
+        n_rows = (n_scores + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5*n_rows))
+        if n_rows == 1:
+            axes = axes.reshape(1, -1)
+        fig.suptitle('Score Distributions Across Experiments', fontsize=16)
+        
+        for idx, score_type in enumerate(sorted(score_types)):
+            row = idx // n_cols
+            col = idx % n_cols
+            ax = axes[row, col]
+            
+            for exp_name, exp_data in self.data.items():
+                histograms = exp_data['histograms']
+                score_tag = f'Scores/{score_type}'
+                
+                if score_tag in histograms:
+                    # Plot final epoch histogram statistics
+                    hist_data = histograms[score_tag]
+                    if hist_data:
+                        final_hist = hist_data[-1]  # Last epoch
+                        # Create simple representation using min/max/mean
+                        mean_val = final_hist['sum'] / final_hist['count'] if final_hist['count'] > 0 else 0
+                        ax.bar(exp_name, mean_val, alpha=0.7, label=exp_name if idx == 0 else "")
+            
+            ax.set_title(f'{score_type} Scores (Final Epoch Mean)')
+            ax.set_ylabel('Score Value')
+            ax.tick_params(axis='x', rotation=45)
+            ax.grid(True, alpha=0.3)
+        
+        # Hide empty subplots
+        for idx in range(n_scores, n_rows * n_cols):
+            row = idx // n_cols
+            col = idx % n_cols
+            axes[row, col].set_visible(False)
+        
+        plt.tight_layout()
+        if save_plots:
+            plt.savefig(os.path.join(self.output_dir, 'score_distributions.png'), dpi=300, bbox_inches='tight')
+        plt.show()
+    
+    def create_comparative_analysis(self, save_plots=True):
+        """Create comparative analysis across architectures and datasets"""
+        if not self.data:
+            print("No data loaded. Run extract_tensorboard_data() first.")
+            return
+        
+        # Parse experiment names to extract dataset, architecture, and data percentage
+        experiment_info = []
+        for exp_name in self.data.keys():
+            parts = exp_name.replace('mascs_', '').split('_')
+            if len(parts) >= 3:
+                dataset = parts[0]
+                architecture = parts[1]
+                data_pct = parts[2].replace('%', '')
+                
+                # Get final accuracy
+                scalars = self.data[exp_name]['scalars']
+                final_acc = 0
+                if 'Testing/Accuracy' in scalars and scalars['Testing/Accuracy']['values']:
+                    final_acc = scalars['Testing/Accuracy']['values'][-1]
+                
+                experiment_info.append({
+                    'experiment': exp_name,
+                    'dataset': dataset,
+                    'architecture': architecture,
+                    'data_percentage': float(data_pct),
+                    'final_accuracy': final_acc
+                })
+        
+        if not experiment_info:
+            print("Could not parse experiment information")
+            return
+        
+        df = pd.DataFrame(experiment_info)
+        
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle('Comparative Analysis Across Experiments', fontsize=16)
+        
+        # Architecture comparison
+        if 'architecture' in df.columns:
+            arch_performance = df.groupby('architecture')['final_accuracy'].mean().sort_values(ascending=False)
+            axes[0, 0].bar(arch_performance.index, arch_performance.values)
+            axes[0, 0].set_title('Average Performance by Architecture')
+            axes[0, 0].set_ylabel('Final Test Accuracy (%)')
+            axes[0, 0].tick_params(axis='x', rotation=45)
+        
+        # Dataset comparison
+        if 'dataset' in df.columns:
+            dataset_performance = df.groupby('dataset')['final_accuracy'].mean().sort_values(ascending=False)
+            axes[0, 1].bar(dataset_performance.index, dataset_performance.values)
+            axes[0, 1].set_title('Average Performance by Dataset')
+            axes[0, 1].set_ylabel('Final Test Accuracy (%)')
+        
+        # Data percentage vs performance
+        if 'data_percentage' in df.columns:
+            pct_performance = df.groupby('data_percentage')['final_accuracy'].mean().sort_values()
+            axes[1, 0].plot(pct_performance.index, pct_performance.values, marker='o')
+            axes[1, 0].set_title('Performance vs Data Percentage')
+            axes[1, 0].set_xlabel('Data Percentage (%)')
+            axes[1, 0].set_ylabel('Final Test Accuracy (%)')
+            axes[1, 0].grid(True, alpha=0.3)
+        
+        # Heatmap of architecture vs dataset performance
+        if len(df['architecture'].unique()) > 1 and len(df['dataset'].unique()) > 1:
+            heatmap_data = df.pivot_table(values='final_accuracy', 
+                                        index='architecture', 
+                                        columns='dataset', 
+                                        aggfunc='mean')
+            sns.heatmap(heatmap_data, annot=True, fmt='.1f', cmap='viridis', ax=axes[1, 1])
+            axes[1, 1].set_title('Architecture vs Dataset Performance Heatmap')
+        
+        plt.tight_layout()
+        if save_plots:
+            plt.savefig(os.path.join(self.output_dir, 'comparative_analysis.png'), dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        return df
+    
+    def export_summary_data(self, output_file='tensorboard_summary.csv'):
+        """Export summary data to CSV for further analysis"""
+        if not self.data:
+            print("No data loaded. Run extract_tensorboard_data() first.")
+            return
+        
+        summary_data = []
+        for exp_name, exp_data in self.data.items():
+            scalars = exp_data['scalars']
+            
+            row = {'experiment': exp_name}
+            
+            # Extract final values
+            for metric in ['Training/Loss', 'Training/Accuracy', 'Testing/Loss', 'Testing/Accuracy']:
+                if metric in scalars and scalars[metric]['values']:
+                    row[f'final_{metric.replace("/", "_").lower()}'] = scalars[metric]['values'][-1]
+            
+            # Extract strategy statistics
+            if 'Strategy/Reward' in scalars:
+                rewards = scalars['Strategy/Reward']['values']
+                row['avg_reward'] = np.mean(rewards)
+                row['std_reward'] = np.std(rewards)
+                row['max_reward'] = np.max(rewards)
+                row['min_reward'] = np.min(rewards)
+            
+            summary_data.append(row)
+        
+        df = pd.DataFrame(summary_data)
+        output_path = os.path.join(self.output_dir, output_file)
+        df.to_csv(output_path, index=False)
+        print(f"Summary data exported to {output_path}")
+        return df
+
+
 def get_dataset(name: str, data_dir: str = './data', data_percentage: float = 100.0):
     """Load dataset by name with configurable data percentage"""
     
@@ -971,6 +1483,12 @@ def main():
                        help='Random seed')
     parser.add_argument('--save_results', type=str, default='mascs_results.json', 
                        help='File to save results')
+    parser.add_argument('--save_intermediate', type=str, default='mascs_intermediate', 
+                       help='Directory to save intermediate tracking files')
+    parser.add_argument('--load_intermediate', type=str, default=None,
+                       help='Directory to load previous intermediate files from')
+    parser.add_argument('--save_frequency', type=int, default=5,
+                       help='Save intermediate files every N epochs')
     parser.add_argument('--optimize_weights', action='store_true',
                        help='Use GP to optimize strategy weights')
     parser.add_argument('--gp_calls', type=int, default=15,
@@ -981,6 +1499,10 @@ def main():
                        help='Use pretrained models')
     parser.add_argument('--list_architectures', action='store_true',
                        help='List available architectures and exit')
+    parser.add_argument('--analyze_logs', type=str, default=None,
+                       help='Analyze TensorBoard logs from specified directory')
+    parser.add_argument('--plot_output_dir', type=str, default='./analysis_plots',
+                       help='Directory to save analysis plots')
     
     args = parser.parse_args()
     
@@ -989,6 +1511,37 @@ def main():
         print("Available architectures:")
         for arch in get_available_architectures():
             print(f"  - {arch}")
+        return
+    
+    # Analyze TensorBoard logs if requested
+    if args.analyze_logs:
+        print(f"Analyzing TensorBoard logs from: {args.analyze_logs}")
+        analyzer = TensorBoardAnalyzer(args.analyze_logs, args.plot_output_dir)
+        
+        # Extract data from TensorBoard events
+        analyzer.extract_tensorboard_data()
+        
+        # Create comprehensive analysis plots
+        print("Creating training curves...")
+        analyzer.create_training_curves()
+        
+        print("Creating strategy analysis...")
+        analyzer.create_strategy_analysis()
+        
+        print("Creating score distribution plots...")
+        analyzer.create_score_distribution_plots()
+        
+        print("Creating comparative analysis...")
+        comparative_df = analyzer.create_comparative_analysis()
+        
+        print("Exporting summary data...")
+        summary_df = analyzer.export_summary_data()
+        
+        print(f"\nAnalysis complete! Plots saved to: {args.plot_output_dir}")
+        if summary_df is not None:
+            print("\nSummary Statistics:")
+            print(summary_df.describe())
+        
         return
     
     # Set device
@@ -1012,6 +1565,12 @@ def main():
     # Create log directory
     os.makedirs(args.log_dir, exist_ok=True)
     os.makedirs(args.data_dir, exist_ok=True)
+    
+    # Initialize intermediate tracker
+    tracker = IntermediateTracker(args.save_intermediate)
+    if args.load_intermediate:
+        tracker.load_intermediate(args.load_intermediate)
+        tracker.analyze_strategy_effectiveness()
     
     results = {}
     
@@ -1087,92 +1646,112 @@ def main():
                     # Evaluate on test set
                     test_loss, test_acc = evaluate_model(model, test_loader, loss_fn, device)
             
-            # Compute performance metrics
-            current_performance = {
-                'loss': train_loss,
-                'accuracy': train_acc,
-                'val_loss': test_loss,
-                'val_accuracy': test_acc
-            }
-            
-            # Compute memory statistics for state encoding with caching
-            cache_key = f"memory_stats_{epoch}"
-            if cache_key in selector.cache['memory_stats']:
-                memory_stats = selector.cache['memory_stats'][cache_key]
-            else:
-                memory_stats = {}
-                # Sample subset for efficiency (instead of all 50K samples)
-                sample_indices = np.random.choice(len(train_dataset), min(1000, len(train_dataset)), replace=False)
-                for strategy in selector.strategy_names:
-                    strategy_scores = []
-                    for i in sample_indices:
-                        temporal_features = selector.compute_temporal_features(i)
-                        score = selector.compute_temporal_bonus(temporal_features, strategy)
-                        strategy_scores.append(score)
-                    memory_stats[strategy] = strategy_scores
-                selector.cache['memory_stats'][cache_key] = memory_stats
-            
-            # Encode current state
-            current_state = selector.encode_state(current_performance, memory_stats)
-            
-            # Optimize strategy weights if requested
-            if args.optimize_weights and epoch == args.weight_optimization_epoch and not weights_optimized:
-                print(f"\nOptimizing strategy weights at epoch {epoch}...")
-                try:
-                    optimized_weights = selector.optimize_strategy_weights(
-                        model, test_loader, args.gp_calls, verbose=True
+                    # Compute performance metrics
+                    current_performance = {
+                        'loss': train_loss,
+                        'accuracy': train_acc,
+                        'val_loss': test_loss,
+                        'val_accuracy': test_acc
+                    }
+                    
+                    # Compute memory statistics for state encoding with caching
+                    cache_key = f"memory_stats_{epoch}"
+                    if cache_key in selector.cache['memory_stats']:
+                        memory_stats = selector.cache['memory_stats'][cache_key]
+                    else:
+                        memory_stats = {}
+                        # Sample subset for efficiency (instead of all 50K samples)
+                        sample_indices = np.random.choice(len(train_dataset), min(1000, len(train_dataset)), replace=False)
+                        for strategy in selector.strategy_names:
+                            strategy_scores = []
+                            for i in sample_indices:
+                                temporal_features = selector.compute_temporal_features(i)
+                                score = selector.compute_temporal_bonus(temporal_features, strategy)
+                                strategy_scores.append(score)
+                            memory_stats[strategy] = strategy_scores
+                        selector.cache['memory_stats'][cache_key] = memory_stats
+                    
+                    # Encode current state
+                    current_state = selector.encode_state(current_performance, memory_stats)
+                    
+                    # Optimize strategy weights if requested
+                    if args.optimize_weights and epoch == args.weight_optimization_epoch and not weights_optimized:
+                        print(f"\nOptimizing strategy weights at epoch {epoch}...")
+                        try:
+                            optimized_weights = selector.optimize_strategy_weights(
+                                model, test_loader, args.gp_calls, verbose=True
+                            )
+                            weights_optimized = True
+                            
+                            # Log optimized weights to tensorboard
+                            for strategy, weights in optimized_weights.items():
+                                for score_type, weight in weights.items():
+                                    writer.add_scalar(f'OptimizedWeights/{strategy}_{score_type}', weight, epoch)
+                                
+                        except Exception as e:
+                            print(f"Weight optimization failed: {e}")
+                            print("Continuing with default weights...")
+                    
+                    # Select strategy using MDP policy
+                    strategy = selector.select_strategy(current_state)
+                    selector.current_strategy = strategy
+                    
+                    # Compute reward (improvement in validation accuracy)
+                    reward = current_performance['val_accuracy'] - prev_performance['accuracy']
+                    selector.reward_history.append(reward)
+                    
+                    # Update policy if we have a previous state
+                    if len(selector.state_history) > 0:
+                        prev_state = selector.state_history[-1]
+                        prev_action = selector.action_history[-1]
+                        policy_loss, value_loss = selector.update_policy(
+                            prev_state, prev_action, reward, current_state
+                        )
+                        dataset_results['policy_losses'].append(policy_loss)
+                        dataset_results['value_losses'].append(value_loss)
+                        
+                        # Log policy updates
+                        writer.add_scalar(f'Policy/Loss', policy_loss, epoch)
+                        writer.add_scalar(f'Policy/Value_Loss', value_loss, epoch)
+                    
+                    # Store state and action
+                    selector.state_history.append(current_state)
+                    selector.action_history.append(strategy)
+                    
+                    # Select new coreset using the chosen strategy
+                    val_improvement = current_performance['val_accuracy'] - prev_performance['accuracy']
+                    new_coreset, scores, all_scores = selector.select_coreset(
+                        model, loss_fn, current_coreset, strategy, val_improvement, train_loader
                     )
-                    weights_optimized = True
+                    current_coreset = new_coreset
                     
-                    # Log optimized weights to tensorboard
-                    for strategy, weights in optimized_weights.items():
-                        for score_type, weight in weights.items():
-                            writer.add_scalar(f'OptimizedWeights/{strategy}_{score_type}', weight, epoch)
-                    
-                except Exception as e:
-                    print(f"Weight optimization failed: {e}")
-                    print("Continuing with default weights...")
+                    # Store results
+                    dataset_results['train_losses'].append(train_loss)
+                    dataset_results['train_accuracies'].append(train_acc)
+                    dataset_results['test_losses'].append(test_loss)
+                    dataset_results['test_accuracies'].append(test_acc)
+                    dataset_results['strategies_used'].append(strategy)
+                    dataset_results['rewards'].append(reward)
             
-            # Select strategy using MDP policy
-            strategy = selector.select_strategy(current_state)
-            selector.current_strategy = strategy
+            # Track intermediate data
+            epoch_data = {
+                'train_loss': train_loss,
+                'train_accuracy': train_acc,
+                'test_loss': test_loss, 
+                'test_accuracy': test_acc,
+                'strategy': strategy,
+                'reward': reward
+            }
+            tracker.log_epoch(experiment_key, epoch, epoch_data)
             
-            # Compute reward (improvement in validation accuracy)
-            reward = current_performance['val_accuracy'] - prev_performance['accuracy']
-            selector.reward_history.append(reward)
-            
-            # Update policy if we have a previous state
-            if len(selector.state_history) > 0:
-                prev_state = selector.state_history[-1]
-                prev_action = selector.action_history[-1]
-                policy_loss, value_loss = selector.update_policy(
-                    prev_state, prev_action, reward, current_state
-                )
-                dataset_results['policy_losses'].append(policy_loss)
-                dataset_results['value_losses'].append(value_loss)
-                
-                # Log policy updates
-                writer.add_scalar(f'Policy/Loss', policy_loss, epoch)
-                writer.add_scalar(f'Policy/Value_Loss', value_loss, epoch)
-            
-            # Store state and action
-            selector.state_history.append(current_state)
-            selector.action_history.append(strategy)
-            
-            # Select new coreset using the chosen strategy
-            val_improvement = current_performance['val_accuracy'] - prev_performance['accuracy']
-            new_coreset, scores, all_scores = selector.select_coreset(
-                model, loss_fn, current_coreset, strategy, val_improvement, train_loader
-            )
-            current_coreset = new_coreset
-            
-            # Store results
-            dataset_results['train_losses'].append(train_loss)
-            dataset_results['train_accuracies'].append(train_acc)
-            dataset_results['test_losses'].append(test_loss)
-            dataset_results['test_accuracies'].append(test_acc)
-            dataset_results['strategies_used'].append(strategy)
-            dataset_results['rewards'].append(reward)
+            # Track strategy performance
+            strategy_metrics = {
+                'train_accuracy': train_acc,
+                'test_accuracy': test_acc,
+                'train_loss': train_loss,
+                'test_loss': test_loss
+            }
+            tracker.log_strategy_performance(experiment_key, epoch, strategy, reward, strategy_metrics)
             
             # Log to tensorboard
             writer.add_scalar(f'Training/Loss', train_loss, epoch)
@@ -1195,14 +1774,19 @@ def main():
             
             prev_performance = current_performance
             
+            # Save intermediate files periodically
+            if epoch % args.save_frequency == 0:
+                tracker.save_intermediate(experiment_key)
+                save_strategy_weights(selector, experiment_key, epoch, args.save_intermediate)
+            
             # Clean up cache every few epochs to prevent memory bloat
             if epoch % 5 == 0:
                 selector.cleanup_cache(epoch)
         
-                writer.close()
-                results[experiment_key] = dataset_results
+        writer.close()
+        results[experiment_key] = dataset_results
         
-                print(f"\nFinal Results for {experiment_key}:")
+        print(f"\nFinal Results for {experiment_key}:")
         print(f"Final Test Accuracy: {dataset_results['test_accuracies'][-1]:.2f}%")
         print(f"Best Test Accuracy: {max(dataset_results['test_accuracies']):.2f}%")
         print(f"Average Reward: {np.mean(dataset_results['rewards']):.4f}")
@@ -1237,8 +1821,17 @@ def main():
         
         json.dump(json_results, f, indent=2)
     
+    # Final save of all tracking data
+    for experiment_key in results.keys():
+        tracker.save_intermediate(experiment_key)
+    
+    # Analyze strategy effectiveness across all experiments
     print(f"\nResults saved to {args.save_results}")
     print(f"Tensorboard logs saved to {args.log_dir}")
+    print(f"Intermediate tracking files saved to {args.save_intermediate}")
+    
+    # Final strategy effectiveness analysis
+    tracker.analyze_strategy_effectiveness()
 
 
 if __name__ == "__main__":
