@@ -662,9 +662,9 @@ class MemoryAugmentedCoresetSelector:
     
     def cleanup_cache(self, current_epoch):
         """Clean up old cache entries to prevent memory bloat"""
-        # Keep only last 3 epochs of cached data
-        epochs_to_keep = 3
-        
+        # Keep only last 5 epochs of cached data (increased from 3)
+        epochs_to_keep = 5
+
         # Clean memory stats cache
         keys_to_remove = []
         for key in self.cache['memory_stats']:
@@ -672,21 +672,21 @@ class MemoryAugmentedCoresetSelector:
                 epoch_num = int(key.split('_')[-1])
                 if current_epoch - epoch_num > epochs_to_keep:
                     keys_to_remove.append(key)
-        
+
         for key in keys_to_remove:
             del self.cache['memory_stats'][key]
-        
-        # Clean temporal features cache if it gets too large
-        if len(self.cache['temporal_features']) > 10000:
-            # Keep only most recent entries
+
+        # More aggressive temporal features cache cleanup
+        if len(self.cache['temporal_features']) > 5000:  # Reduced from 10000
+            # Keep only the most recent entries
             items = list(self.cache['temporal_features'].items())
-            self.cache['temporal_features'] = dict(items[-5000:])
-        
-        # Clean features cache if it gets too large  
-        if len(self.cache['features']) > 100:
-            # Keep only most recent entries
+            self.cache['temporal_features'] = dict(items[-2500:])  # Keep 50%
+
+        # More efficient features cache management
+        if len(self.cache['features']) > 200:  # Increased from 100 to allow better caching
+            # Sort by access frequency (newer keys more likely to be reused)
             items = list(self.cache['features'].items())
-            self.cache['features'] = dict(items[-50:])
+            self.cache['features'] = dict(items[-100:])  # Keep most recent 100
 
 
 class TransformerPolicyNetwork(nn.Module):

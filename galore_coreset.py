@@ -1030,7 +1030,7 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default='cifar10', 
                        choices=['cifar10', 'cifar100'],
                        help='Dataset to use')
-    parser.add_argument('--data_dir', type=str, default='./data',
+    parser.add_argument('--data_dir', type=str, default='/Users/tanmoy/research/data',
                        help='Directory to store/download datasets')
     parser.add_argument('--val_size', type=int, default=5000,
                        help='Validation set size')

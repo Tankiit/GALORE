@@ -767,16 +767,26 @@ class MemoryAugmentedCoresetSelector:
     def compute_gradient_score(self, model, x, y, loss_fn):
         """Compute gradient magnitude score"""
         model.zero_grad()
-        logits = model(x)
-        loss = loss_fn(logits, y)
-        loss.backward()
-        
-        grad_norms = []
-        for param in model.parameters():
-            if param.grad is not None:
-                grad_norms.append(param.grad.detach().norm(2).item())
-        
-        return np.mean(grad_norms) if grad_norms else 0.0
+
+        # Set model to eval mode to avoid batch norm issues with single samples
+        original_training = model.training
+        model.eval()
+
+        try:
+            with torch.enable_grad():
+                logits = model(x)
+                loss = loss_fn(logits, y)
+                loss.backward()
+
+            grad_norms = []
+            for param in model.parameters():
+                if param.grad is not None:
+                    grad_norms.append(param.grad.detach().norm(2).item())
+
+            return np.mean(grad_norms) if grad_norms else 0.0
+        finally:
+            # Restore original training mode
+            model.train(original_training)
     
     def compute_forgetting_score(self, sample_idx, current_correct):
         """Compute forgetting score based on history"""
@@ -863,18 +873,16 @@ class MemoryAugmentedCoresetSelector:
         
         forgetting_frequency = np.mean(forgetting_history)
         
+        selection_impact = 0.0
         selected_indices = np.where(selection_history > 0.5)[0]
         if len(selected_indices) > 0:
             improvements = [self.validation_improvements[sample_idx][i] for i in range(min(len(selected_indices), len(self.validation_improvements[sample_idx])))]
             selection_impact = np.mean(improvements) if improvements else 0.0
-        else:
-            selection_impact = 0.0
         
+        staleness = 0.0
         if len(selection_history) > 0:
             last_selection = np.where(selection_history > 0.5)[0]
             staleness = len(selection_history) - last_selection[-1] if len(last_selection) > 0 else len(selection_history)
-        else:
-            staleness = 0.0
         
         return {
             'volatility': volatility,
@@ -972,22 +980,19 @@ class MemoryAugmentedCoresetSelector:
                     np.max(all_scores[key]) - np.min(all_scores[key]))
         
         # Compute final scores with strategy weights and temporal bonus
-        if strategy == 'temp':
-            # Handle temporary strategy from GP optimization
-            strategy_weights = self.gp_optimizer.history['weights'][-1] if self.gp_optimizer.history['weights'] else self.strategies['explore']
-        else:
-            strategy_weights = self.strategies[strategy]
         final_scores = np.zeros(len(self.dataset))
         
         for i in range(len(self.dataset)):
             if strategy == 'temp':
                 # For temporary strategy, weights are directly keyed by score type
+                strategy_weights = self.gp_optimizer.history['weights'][-1] if self.gp_optimizer.history['weights'] else self.strategies['explore']
                 weighted_sum = sum(
                     strategy_weights[score_type] * all_scores[score_type][i] 
                     for score_type in ['S_U', 'S_B', 'S_G', 'S_F', 'S_D', 'S_C']
                 )
             else:
                 # For normal strategies, use the original format
+                strategy_weights = self.strategies[strategy]
                 weighted_sum = sum(
                     strategy_weights[score_type] * all_scores[score_type][i] 
                     for score_type in ['S_U', 'S_B', 'S_G', 'S_F', 'S_D', 'S_C']
@@ -1128,22 +1133,169 @@ def get_dataset(name: str, data_dir: str = './data'):
         raise ValueError(f"Dataset {name} not supported")
 
 
-def create_model(dataset_name: str, num_classes: int, device: str):
-    """Create model based on dataset"""
-    if dataset_name.lower() in ['cifar10', 'cifar100']:
-        model = torchvision.models.resnet18(pretrained=False, num_classes=num_classes)
-    elif dataset_name.lower() == 'mnist':
-        model = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(28*28, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, num_classes)
+class ModelFactory:
+    """Factory for creating different model architectures"""
+
+    @staticmethod
+    def create_vision_transformer(num_classes: int, image_size: int = 224, patch_size: int = 16,
+                                 embed_dim: int = 768, depth: int = 12, num_heads: int = 12):
+        """Create Vision Transformer model"""
+        try:
+            from torchvision.models import vit_b_16, vit_b_32, vit_l_16
+            if image_size == 224 and patch_size == 16:
+                model = vit_b_16(weights=None, num_classes=num_classes)
+            elif image_size == 224 and patch_size == 32:
+                model = vit_b_32(weights=None, num_classes=num_classes)
+            elif image_size == 224 and patch_size == 16 and embed_dim == 1024:
+                model = vit_l_16(weights=None, num_classes=num_classes)
+            else:
+                # Custom ViT (simplified implementation)
+                model = SimpleViT(image_size, patch_size, num_classes, embed_dim, depth, num_heads)
+            return model
+        except ImportError:
+            # Fallback to simple ViT implementation
+            return SimpleViT(image_size, patch_size, num_classes, embed_dim, depth, num_heads)
+
+    @staticmethod
+    def create_resnet(variant: str, num_classes: int, pretrained: bool = False):
+        """Create ResNet variants"""
+        if variant.lower() == 'resnet18':
+            return torchvision.models.resnet18(weights='IMAGENET1K_V1' if pretrained else None, num_classes=num_classes)
+        elif variant.lower() == 'resnet34':
+            return torchvision.models.resnet34(weights='IMAGENET1K_V1' if pretrained else None, num_classes=num_classes)
+        elif variant.lower() == 'resnet50':
+            return torchvision.models.resnet50(weights='IMAGENET1K_V2' if pretrained else None, num_classes=num_classes)
+        elif variant.lower() == 'resnet101':
+            return torchvision.models.resnet101(weights='IMAGENET1K_V2' if pretrained else None, num_classes=num_classes)
+        elif variant.lower() == 'resnet152':
+            return torchvision.models.resnet152(weights='IMAGENET1K_V2' if pretrained else None, num_classes=num_classes)
+        else:
+            raise ValueError(f"ResNet variant {variant} not supported")
+
+    @staticmethod
+    def create_efficientnet(variant: str, num_classes: int, pretrained: bool = False):
+        """Create EfficientNet variants"""
+        try:
+            if variant.lower() == 'efficientnet_b0':
+                return torchvision.models.efficientnet_b0(weights='IMAGENET1K_V1' if pretrained else None, num_classes=num_classes)
+            elif variant.lower() == 'efficientnet_b1':
+                return torchvision.models.efficientnet_b1(weights='IMAGENET1K_V2' if pretrained else None, num_classes=num_classes)
+            elif variant.lower() == 'efficientnet_b2':
+                return torchvision.models.efficientnet_b2(weights='IMAGENET1K_V1' if pretrained else None, num_classes=num_classes)
+            elif variant.lower() == 'efficientnet_b3':
+                return torchvision.models.efficientnet_b3(weights='IMAGENET1K_V1' if pretrained else None, num_classes=num_classes)
+            elif variant.lower() == 'efficientnet_b4':
+                return torchvision.models.efficientnet_b4(weights='IMAGENET1K_V1' if pretrained else None, num_classes=num_classes)
+            else:
+                raise ValueError(f"EfficientNet variant {variant} not supported")
+        except AttributeError:
+            raise ValueError(f"EfficientNet {variant} requires newer torchvision version")
+
+    @staticmethod
+    def create_densenet(variant: str, num_classes: int, pretrained: bool = False):
+        """Create DenseNet variants"""
+        if variant.lower() == 'densenet121':
+            return torchvision.models.densenet121(weights='IMAGENET1K_V1' if pretrained else None, num_classes=num_classes)
+        elif variant.lower() == 'densenet161':
+            return torchvision.models.densenet161(weights='IMAGENET1K_V1' if pretrained else None, num_classes=num_classes)
+        elif variant.lower() == 'densenet169':
+            return torchvision.models.densenet169(weights='IMAGENET1K_V1' if pretrained else None, num_classes=num_classes)
+        elif variant.lower() == 'densenet201':
+            return torchvision.models.densenet201(weights='IMAGENET1K_V1' if pretrained else None, num_classes=num_classes)
+        else:
+            raise ValueError(f"DenseNet variant {variant} not supported")
+
+
+class SimpleViT(nn.Module):
+    """Simple Vision Transformer implementation"""
+    def __init__(self, image_size=224, patch_size=16, num_classes=1000, embed_dim=768, depth=12, num_heads=12):
+        super().__init__()
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.num_patches = (image_size // patch_size) ** 2
+
+        # Patch embedding
+        self.patch_embed = nn.Conv2d(3, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.pos_embed = nn.Parameter(torch.randn(1, self.num_patches + 1, embed_dim))
+        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
+
+        # Transformer layers
+        self.transformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(embed_dim, num_heads, embed_dim*4, dropout=0.1, batch_first=True),
+            num_layers=depth
         )
+
+        # Classification head
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, num_classes)
+
+    def forward(self, x):
+        B = x.shape[0]
+        x = self.patch_embed(x).flatten(2).transpose(1, 2)  # B, N, D
+        cls_token = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls_token, x], dim=1)
+        x = x + self.pos_embed
+        x = self.transformer(x)
+        x = self.norm(x[:, 0])  # Use CLS token
+        return self.head(x)
+
+
+def create_model(architecture: str, dataset_name: str, num_classes: int, device: str, pretrained: bool = False):
+    """Create model with specified architecture"""
+    factory = ModelFactory()
+
+    # Handle legacy calls with just dataset name
+    if architecture is None:
+        if dataset_name.lower() in ['cifar10', 'cifar100', 'imagenet', 'imagenet100', 'stl10']:
+            architecture = 'resnet18'
+        elif dataset_name.lower() == 'mnist':
+            architecture = 'simple_cnn'
+        else:
+            raise ValueError(f"Default architecture for {dataset_name} not defined")
+
+    # Create model based on architecture
+    if 'resnet' in architecture.lower():
+        model = factory.create_resnet(architecture, num_classes, pretrained)
+    elif 'vit' in architecture.lower() or 'vision_transformer' in architecture.lower():
+        if 'imagenet' in dataset_name.lower():
+            model = factory.create_vision_transformer(num_classes, image_size=224)
+        else:
+            model = factory.create_vision_transformer(num_classes, image_size=32 if 'cifar' in dataset_name.lower() else 224)
+    elif 'efficientnet' in architecture.lower():
+        model = factory.create_efficientnet(architecture, num_classes, pretrained)
+    elif 'densenet' in architecture.lower():
+        model = factory.create_densenet(architecture, num_classes, pretrained)
+    elif architecture.lower() == 'simple_cnn':
+        if dataset_name.lower() == 'mnist':
+            model = nn.Sequential(
+                nn.Flatten(),
+                nn.Linear(28*28, 128),
+                nn.ReLU(),
+                nn.Linear(128, 64),
+                nn.ReLU(),
+                nn.Linear(64, num_classes)
+            )
+        else:
+            # Simple CNN for other datasets
+            model = nn.Sequential(
+                nn.Conv2d(3, 32, 3, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Conv2d(32, 64, 3, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Conv2d(64, 128, 3, padding=1),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool2d((4, 4)),
+                nn.Flatten(),
+                nn.Linear(128 * 16, 256),
+                nn.ReLU(),
+                nn.Dropout(0.5),
+                nn.Linear(256, num_classes)
+            )
     else:
-        raise ValueError(f"Model for {dataset_name} not implemented")
-    
+        raise ValueError(f"Architecture {architecture} not supported")
+
     return model.to(device)
 
 
@@ -1220,6 +1372,8 @@ def main():
                            help='Directory to store datasets')
     data_group.add_argument('--budget', type=int, default=5000,
                            help='Coreset budget (number of samples)')
+    data_group.add_argument('--architecture', type=str, default='resnet18',
+                              help='Model architecture to use')
 
     # Training Configuration
     training_group = parser.add_argument_group('Training Configuration')
@@ -1377,7 +1531,7 @@ def main():
         test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
         
         # Create model
-        model = create_model(dataset_name, num_classes, device)
+        model = create_model(args.architecture, dataset_name, num_classes, device)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
         loss_fn = nn.CrossEntropyLoss()
         
@@ -1538,29 +1692,92 @@ def main():
             dataset_results['strategies_used'].append(strategy)
             dataset_results['rewards'].append(reward)
 
-            # Log metrics to tensorboard
+            # Enhanced tensorboard logging
+            # Basic metrics
             writer.add_scalar(f'Train/Loss', train_loss, epoch)
             writer.add_scalar(f'Train/Accuracy', train_acc, epoch)
             writer.add_scalar(f'Test/Loss', test_loss, epoch)
             writer.add_scalar(f'Test/Accuracy', test_acc, epoch)
-            writer.add_scalar(f'Strategy/Reward', reward, epoch)
-            writer.add_scalar(f'Strategy/Current', selector.strategy_names.index(strategy), epoch)
 
-            # Log strategy weights
+            # Performance improvements
+            acc_improvement = current_performance['val_accuracy'] - prev_performance['accuracy']
+            loss_improvement = prev_performance.get('val_loss', float('inf')) - current_performance['val_loss']
+            writer.add_scalar(f'Performance/Accuracy_Improvement', acc_improvement, epoch)
+            writer.add_scalar(f'Performance/Loss_Improvement', loss_improvement, epoch)
+
+            # Strategy and reward metrics
+            writer.add_scalar(f'Strategy/Reward', reward, epoch)
+            writer.add_scalar(f'Strategy/Current_Index', selector.strategy_names.index(strategy), epoch)
+            writer.add_text(f'Strategy/Current_Name', strategy, epoch)
+
+            # Cumulative rewards
+            cumulative_reward = sum(dataset_results['rewards'])
+            writer.add_scalar(f'Strategy/Cumulative_Reward', cumulative_reward, epoch)
+
+            # Strategy distribution over time
+            strategy_counts = {s: dataset_results['strategies_used'].count(s) for s in selector.strategy_names}
+            for strat_name, count in strategy_counts.items():
+                writer.add_scalar(f'Strategy/Distribution_{strat_name}', count, epoch)
+
+            # Log strategy weights with more detail
             if strategy in selector.strategies:
                 current_strategy_weights = selector.strategies[strategy]
                 for score_type, weight in current_strategy_weights.items():
-                    writer.add_scalar(f'Weights/{strategy}_{score_type}', weight, epoch)
+                    writer.add_scalar(f'Weights/{strategy}/{score_type}', weight, epoch)
 
-            # Log temporal credits if available
+                # Log weight entropy (diversity measure)
+                weights_array = np.array(list(current_strategy_weights.values()))
+                weight_entropy = -np.sum(weights_array * np.log(weights_array + 1e-10))
+                writer.add_scalar(f'Weights/{strategy}/Entropy', weight_entropy, epoch)
+
+            # Enhanced temporal credit analysis
             if len(selector.effect_buffer) > 0:
                 recent_effects = [e for e in selector.effect_buffer[-10:] if 'future_effects' in e and e['future_effects']]
                 if recent_effects:
                     avg_credit = np.mean([np.mean([f['reward'] for f in e['future_effects']]) for e in recent_effects])
                     writer.add_scalar(f'TemporalCredit/Average', avg_credit, epoch)
 
-            # Save intermediate results
-            if hasattr(args, 'save_intermediate') and args.save_intermediate:
+                    # Log strategy-specific temporal effects
+                    for strat in selector.strategy_names:
+                        strat_effects = [e for e in recent_effects if e.get('strategy') == strat]
+                        if strat_effects:
+                            strat_avg_credit = np.mean([np.mean([f['reward'] for f in e['future_effects']]) for e in strat_effects])
+                            writer.add_scalar(f'TemporalCredit/Strategy_{strat}', strat_avg_credit, epoch)
+
+            # Memory and cache statistics
+            if hasattr(selector, 'cache_hits') and hasattr(selector, 'cache_misses'):
+                total_requests = selector.cache_hits + selector.cache_misses
+                if total_requests > 0:
+                    hit_rate = selector.cache_hits / total_requests
+                    writer.add_scalar(f'Cache/Hit_Rate', hit_rate, epoch)
+                    writer.add_scalar(f'Cache/Total_Requests', total_requests, epoch)
+
+            # Policy network losses (if available)
+            if dataset_results['policy_losses']:
+                writer.add_scalar(f'Policy/Loss', dataset_results['policy_losses'][-1], epoch)
+            if dataset_results['value_losses']:
+                writer.add_scalar(f'Policy/Value_Loss', dataset_results['value_losses'][-1], epoch)
+
+            # Coreset quality metrics
+            if len(current_coreset) > 0:
+                # Log class distribution in coreset
+                coreset_labels = [train_dataset[i][1] for i in current_coreset]
+                class_counts = np.bincount(coreset_labels, minlength=num_classes)
+                class_distribution_entropy = -np.sum((class_counts / len(coreset_labels)) *
+                                                   np.log((class_counts / len(coreset_labels)) + 1e-10))
+                writer.add_scalar(f'Coreset/Class_Distribution_Entropy', class_distribution_entropy, epoch)
+
+                # Log most and least represented classes
+                most_common_class = np.argmax(class_counts)
+                least_common_class = np.argmin(class_counts)
+                writer.add_scalar(f'Coreset/Most_Common_Class', most_common_class, epoch)
+                writer.add_scalar(f'Coreset/Least_Common_Class', least_common_class, epoch)
+                writer.add_scalar(f'Coreset/Max_Class_Count', np.max(class_counts), epoch)
+                writer.add_scalar(f'Coreset/Min_Class_Count', np.min(class_counts), epoch)
+
+            # Save intermediate results at specified frequency
+            if (hasattr(args, 'save_intermediate') and args.save_intermediate and
+                (epoch % args.save_frequency == 0 or epoch == args.epochs - 1)):
                 save_intermediate_results(args.save_intermediate, dataset_name, epoch, args.epochs,
                                         current_performance, dataset_results, strategy)
 
@@ -1569,6 +1786,22 @@ def main():
             # Progress update
             if epoch % 10 == 0 or epoch == args.epochs - 1:
                 print(f"Epoch {epoch+1}/{args.epochs} - Train: {train_acc:.2f}% | Test: {test_acc:.2f}% | Strategy: {strategy}")
+
+        # Log final experiment summary to tensorboard
+        writer.add_text('Experiment/Summary', f"""
+        Final Results for {dataset_name}:
+        - Final Test Accuracy: {dataset_results['test_accuracies'][-1]:.2f}%
+        - Best Test Accuracy: {max(dataset_results['test_accuracies']):.2f}%
+        - Total Reward: {sum(dataset_results['rewards']):.3f}
+        - Most Used Strategy: {max(set(dataset_results['strategies_used']), key=dataset_results['strategies_used'].count)}
+        - Strategy Distribution: {dict((s, dataset_results['strategies_used'].count(s)) for s in set(dataset_results['strategies_used']))}
+        """, args.epochs)
+
+        # Log histograms of key metrics
+        if len(dataset_results['rewards']) > 0:
+            writer.add_histogram('Rewards/Distribution', np.array(dataset_results['rewards']), args.epochs)
+        if len(dataset_results['test_accuracies']) > 0:
+            writer.add_histogram('Accuracy/Test_Distribution', np.array(dataset_results['test_accuracies']), args.epochs)
 
         writer.close()
 
