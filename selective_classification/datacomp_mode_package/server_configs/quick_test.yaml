@@ -1,0 +1,77 @@
+# Quick Test Configuration
+# Fast config for debugging and testing
+
+# Dataset Configuration
+dataset:
+  name: "datacomp"
+  root: "./data"
+  size: 1000  # Small for testing
+  image_size: 224
+
+# Model Configuration
+model:
+  clip_model: "ViT-B-32"
+  pretrained: "openai"
+  device: "cuda"
+  mixed_precision: true
+
+# Selection Configuration
+selection:
+  strategy: "one_shot"
+  budget: 0.3
+  batch_size: 128
+  nuclear_norm_weight: 0.3
+  clip_score_weight: 0.7
+
+# Training Configuration
+training:
+  epochs: 3
+  batch_size: 32
+  learning_rate: 0.000001
+  warmup_steps: 50
+  optimizer: "adamw"
+  weight_decay: 0.01
+  gradient_clip: 1.0
+
+# Iterative MODE Configuration
+iterative:
+  cycles: 2
+  samples_per_cycle: 100
+
+# Gradient Cache Configuration
+cache:
+  enabled: true
+  max_size_mb: 500
+  staleness_threshold: 100
+  bloom_filter_size: 10000
+  hash_functions: 3
+
+# Logging Configuration
+logging:
+  tensorboard: true
+  tensorboard_dir: "./runs"
+  log_frequency: 10
+  save_frequency: 100
+  verbose: true
+
+# Output Configuration
+output:
+  checkpoint_dir: "./checkpoints"
+  results_dir: "./results"
+  save_selected_indices: true
+  save_model: true
+
+# Server Configuration
+server:
+  distributed: false
+  world_size: 1
+  rank: 0
+  backend: "nccl"
+  init_method: "env://"
+
+# Experiment Metadata
+experiment:
+  name: "datacomp_mode_test"
+  description: "Quick test run for debugging"
+  seed: 42
+  tags: ["test", "debug"]

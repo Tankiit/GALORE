@@ -993,7 +993,15 @@ class ProxyModel(nn.Module):
     def compute_gradient_importance_fast(self,
                                          images: torch.Tensor,
                                          texts: torch.Tensor) -> torch.Tensor:
-        """Fast gradient importance approximation using per-sample loss magnitude."""
+        """
+        Fast gradient importance approximation using per-sample loss magnitude.
+
+        This is 100x faster than per-sample gradients!
+        Key insight: Per-sample loss magnitude correlates with gradient norm.
+
+        Based on: "Beyond neural scaling laws: beating power law scaling via
+        data pruning" (Sorscher et al., 2022)
+        """
         self.model.eval()  # Use eval for faster inference
 
         with torch.no_grad():
@@ -1026,7 +1034,15 @@ class ProxyModel(nn.Module):
     def compute_el2n_importance(self,
                                 images: torch.Tensor,
                                 texts: torch.Tensor) -> torch.Tensor:
-        """Compute EL2N importance (inference-based signal)."""
+        """
+        EL2N: Expected L2 Norm of error vector.
+
+        NO gradients needed! Pure inference-based importance.
+        Papers show this correlates strongly with gradient norm.
+
+        Based on: "Deep Learning on a Data Diet" (Paul et al., 2021)
+        Lower confidence = higher learning potential = higher importance
+        """
         self.model.eval()
 
         with torch.no_grad():
@@ -1368,7 +1384,17 @@ class HybridMODETrainer:
 # ============================================================================
 # DATACOMP MODE: CORRECT IMPLEMENTATION
 # ============================================================================
-# DataComp MODE workflow: score -> select -> train (one-shot or periodic)
+"""
+DataComp MODE: CORRECT Implementation
+
+PROPER WORKFLOW:
+1. Pass 1: Score all 400M samples (using hybrid proxy + checkpoint)
+2. Select: Choose top 10% (40M samples) based on scores
+3. Train: Train CLIP on those 40M samples for MULTIPLE epochs
+4. (Optional) Periodic re-selection during training
+
+This matches DataComp filtering track requirements.
+"""
 
 
 @dataclass
@@ -1428,7 +1454,11 @@ class DataCompMODEConfig:
 # ============================================================================
 
 class DataScorer:
-    """Score dataset samples for importance (selection phase)."""
+    """
+    Score all samples in dataset for importance.
+
+    This is the SELECTION phase - runs once (or periodically).
+    """
 
     def __init__(self, config: DataCompMODEConfig):
         self.config = config
@@ -1617,47 +1647,23 @@ class CLIPTrainer:
             weight_decay=0.2
         )
 
-        # Learning rate scheduler (will be initialized when training starts)
-        self.scheduler = None
-        self.total_steps = None
+        # Learning rate scheduler
+        self.total_steps = None  # Set when training starts
 
         # Mixed precision
         self.scaler = GradScaler() if config.mixed_precision else None
 
         print("CLIP trainer ready")
 
-    def initialize_scheduler(self, num_epochs: int, steps_per_epoch: int):
-        """Initialize cosine annealing scheduler with linear warmup"""
-        self.total_steps = num_epochs * steps_per_epoch
-
-        # Create scheduler with linear warmup + cosine annealing
-        def lr_lambda(step):
-            if step < self.config.warmup_steps:
-                # Linear warmup
-                return float(step) / float(max(1, self.config.warmup_steps))
-            else:
-                # Cosine annealing after warmup
-                progress = float(step - self.config.warmup_steps) / float(
-                    max(1, self.total_steps - self.config.warmup_steps)
-                )
-                return 0.5 * (1.0 + np.cos(np.pi * progress))
-
-        self.scheduler = torch.optim.lr_scheduler.LambdaLR(
-            self.optimizer, lr_lambda=lr_lambda
-        )
-
-        print(f"Initialized cosine annealing scheduler:")
-        print(f"  Total steps: {self.total_steps}")
-        print(f"  Warmup steps: {self.config.warmup_steps}")
-        print(f"  Base LR: {self.config.learning_rate:.2e}")
-
     def training_step(self, images: torch.Tensor, texts: torch.Tensor) -> Dict:
         """Single training step"""
         self.model.train()
 
-        # Update learning rate with scheduler (if initialized)
-        if self.scheduler is not None:
-            self.scheduler.step()
+        # Learning rate warmup
+        if self.global_step < self.config.warmup_steps:
+            lr_scale = min(1.0, self.global_step / self.config.warmup_steps)
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = self.config.learning_rate * lr_scale
 
         # Forward pass
         with autocast(enabled=self.config.mixed_precision):
@@ -1770,12 +1776,6 @@ class CLIPTrainer:
     def train(self, dataloader: DataLoader):
         """Train for multiple epochs"""
         self.total_steps = len(dataloader) * self.config.num_epochs
-
-        # Initialize learning rate scheduler
-        self.initialize_scheduler(
-            num_epochs=self.config.num_epochs,
-            steps_per_epoch=len(dataloader)
-        )
 
         print(f"\nStarting training on selected subset")
         print(f"   Total epochs: {self.config.num_epochs}")

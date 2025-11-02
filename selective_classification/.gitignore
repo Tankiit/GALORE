@@ -1,0 +1,142 @@
+# MODE-VLM .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.pyz
+.Python
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data & Caches
+*.pt
+*.pth
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.npy
+*.npz
+
+# Datasets (large files)
+data/
+datasets/
+datacomp_data/
+datacomp_cache/
+*.tar
+*.tar.gz
+*.zip
+
+# Checkpoints & Models
+checkpoints/
+*.ckpt
+model_weights/
+saved_models/
+mode_output/
+*.safetensors
+
+# Logs & Outputs
+logs/
+runs/
+outputs/
+results/
+*.log
+tensorboard/
+wandb/
+
+# Demo Databases
+demo_databases/
+demo_embedding_db/
+demo_embedding_db_random/
+large_db_*/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# pytest
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Configuration (may contain secrets)
+*config_local.yaml
+*secrets*.yaml
+.env
+.env.local
+
+# Compiled
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+
+# Package files
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Large data files to exclude
+*.bin  # FAISS indices
+*.index  # FAISS indices
+faiss_*.bin
+*.arrow  # PyArrow files
+
+# Generated documentation
+docs/_build/
+site/
+
+# Ignore specific output directories
+visualizations/
+experiments/
+scratch/
