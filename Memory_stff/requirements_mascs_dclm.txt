@@ -1,0 +1,73 @@
+# MASCS-DCLM Integration Requirements
+
+# Core dependencies
+torch>=1.12.0
+transformers>=4.20.0
+datasets>=2.0.0
+numpy>=1.21.0
+tqdm>=4.64.0
+
+# Text processing and embeddings
+sentence-transformers>=2.2.0  # For high-quality text embeddings
+tokenizers>=0.13.0
+
+# Data processing and storage
+pandas>=1.4.0
+sqlite3  # Built-in with Python
+hashlib  # Built-in with Python
+pathlib  # Built-in with Python
+json  # Built-in with Python
+
+# Scientific computing
+scipy>=1.8.0
+scikit-learn>=1.1.0
+
+# Similarity search (optional but recommended)
+faiss-cpu>=1.7.0  # Use faiss-gpu for GPU support
+
+# Distributed processing (optional)
+ray[default]>=2.0.0
+
+# Visualization and analysis (optional)
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Development and testing
+pytest>=7.0.0
+pytest-cov>=3.0.0
+black>=22.0.0
+flake8>=4.0.0
+
+# Logging and utilities
+loguru>=0.6.0  # Alternative to standard logging
+click>=8.0.0   # For better CLI interfaces
+
+# Memory profiling (development)
+memory-profiler>=0.60.0
+
+# Progress bars and monitoring
+rich>=12.0.0   # Enhanced progress bars and formatting
+
+# Optional: For advanced text processing
+spacy>=3.4.0
+nltk>=3.7
+
+# Optional: For web data collection
+requests>=2.28.0
+beautifulsoup4>=4.11.0
+
+# Optional: For configuration management
+pyyaml>=6.0
+omegaconf>=2.2.0
+
+# Optional: For experiment tracking
+tensorboard>=2.9.0
+wandb>=0.12.0
+
+# For TensorBoard log analysis and dashboard
+streamlit>=1.28.0
+plotly>=5.15.0
+
+# Optional: For model serving
+fastapi>=0.78.0
+uvicorn>=0.18.0

@@ -1,0 +1,288 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                                                                            ║
+║            🔍 INTERACTIVE RETRIEVAL DEMO - QUICK START GUIDE              ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+📦 WHAT YOU GET
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ Interactive web interface for Text-to-Image retrieval
+✅ Interactive web interface for Image-to-Text retrieval
+✅ Command-line interface for quick experiments
+✅ Beautiful visualizations with similarity scores
+✅ Support for trained MODE models and baselines
+✅ Pre-computed embeddings for fast retrieval
+
+
+📁 NEW FILES CREATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✓ interactive_retrieval_demo.py      - Main demo application
+✓ build_retrieval_database.py        - Database builder
+✓ RETRIEVAL_DEMO_README.md           - Complete documentation
+
+
+🚀 QUICK START (3 STEPS)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Step 1: Install Dependencies
+────────────────────────────
+pip install transformers torch gradio matplotlib pillow
+
+
+Step 2: Build Database
+──────────────────────
+python build_retrieval_database.py \
+    --data_dir ./datacomp_data \
+    --model_path ./mode_output/final_clip_model.pt \
+    --output_path ./retrieval_database.pt \
+    --max_samples 1000
+
+This takes ~5 minutes for 1000 samples.
+
+
+Step 3: Launch Demo
+───────────────────
+python interactive_retrieval_demo.py \
+    --interface web \
+    --database_path ./retrieval_database.pt \
+    --model_path ./mode_output/final_clip_model.pt
+
+Then open: http://localhost:7860
+
+
+🎨 FEATURES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Web Interface (Gradio):
+  • 📝 Text → Image tab
+    - Enter: "a cat sitting on a windowsill"
+    - Get: Top-5 matching images with scores
+    - Visual: Side-by-side image grid
+
+  • 🖼️ Image → Text tab
+    - Upload: Your test image
+    - Get: Top-5 matching captions with scores
+    - Visual: Query image + ranked captions
+
+Command Line Interface:
+  • Quick text-to-image: t2i a dog playing in a park
+  • Quick image-to-text: i2t /path/to/image.jpg
+  • Interactive: Live feedback loop
+
+
+📊 EXAMPLE USAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Text-to-Image Queries:
+  ✓ "a beautiful sunset over mountains"
+  ✓ "a cat sitting on a windowsill"
+  ✓ "people playing soccer in a park"
+  ✓ "a delicious pizza with many toppings"
+
+Image-to-Text:
+  ✓ Upload your test images
+  ✓ See which captions CLIP thinks match
+  ✓ Compare MODE vs baseline models
+
+
+🎯 USE CASES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For Research:
+  • Analyze what your MODE model learned
+  • Compare MODE vs random selection
+  • Find interesting examples for paper
+  • Debug retrieval failures
+
+For Demos:
+  • Interactive paper supplement
+  • Live demo for reviewers
+  • Show MODE's capabilities
+  • Teaching tool for VLMs
+
+For Development:
+  • Prototype retrieval system
+  • Test query variations
+  • Benchmark performance
+  • User experience research
+
+
+🔧 ADVANCED OPTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Use MODE-Selected Data:
+  python build_retrieval_database.py \
+      --selected_indices ./datacomp_mode_cache/selected_indices.pt \
+      --output_path ./retrieval_database_mode.pt
+
+Change Port:
+  python interactive_retrieval_demo.py --port 8080
+
+CPU Mode:
+  python interactive_retrieval_demo.py --device cpu
+
+CLI Interface:
+  python interactive_retrieval_demo.py --interface cli
+
+
+📈 UNDERSTANDING SCORES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Similarity scores range from 0.0 to 1.0:
+
+  Score > 0.80:  Excellent match! 🟢
+  Score > 0.65:  Good match       🟡
+  Score > 0.50:  Fair match       🟠
+  Score < 0.50:  Weak match       🔴
+
+Example:
+  Text: "a cat sitting on a windowsill"
+    → Image #1 [0.89]: Cat on windowsill ✓ Perfect!
+    → Image #2 [0.82]: Cat indoors       ✓ Good
+    → Image #3 [0.75]: Cat near window   ✓ Reasonable
+    → Image #4 [0.54]: Dog on windowsill ✗ Wrong animal
+
+
+🎬 DEMO WALKTHROUGH
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Web Interface:
+
+  1. Build database (once):
+     python build_retrieval_database.py --data_dir ./data --output_path ./db.pt
+
+  2. Launch:
+     python interactive_retrieval_demo.py --database_path ./db.pt
+
+  3. Open browser:
+     http://localhost:7860
+
+  4. Try Text → Image:
+     - Enter: "a beautiful sunset"
+     - Click: 🔍 Search
+     - See: Top matching images!
+
+  5. Try Image → Text:
+     - Upload: your_image.jpg
+     - Click: 🔍 Search
+     - See: Top matching captions!
+
+
+Command Line:
+
+  $ python interactive_retrieval_demo.py --interface cli --database_path ./db.pt
+
+  > t2i a dog playing in a park
+
+  Searching for images matching: 'a dog playing in a park'
+  ----------------------------------------------------------------------
+  
+  Top 5 Results:
+    1. Image #0042 - Score: 0.8734
+    2. Image #0156 - Score: 0.8521
+    3. Image #0289 - Score: 0.8312
+    4. Image #0337 - Score: 0.8145
+    5. Image #0421 - Score: 0.7998
+  
+  Visualize results? (y/n): y
+  [Opens matplotlib window with results]
+
+
+🐛 TROUBLESHOOTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Issue: "No database loaded"
+→ Build database first: python build_retrieval_database.py
+
+Issue: "gradio not installed"
+→ Install: pip install gradio
+→ Or use CLI: --interface cli
+
+Issue: "Model not found"
+→ Check path: --model_path ./mode_output/final_clip_model.pt
+→ Or use pretrained: omit --model_path
+
+Issue: Slow retrieval
+→ Pre-compute embeddings with build_retrieval_database.py
+→ Use GPU: --device cuda
+→ Reduce samples: --max_samples 500
+
+
+📚 DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Full documentation: RETRIEVAL_DEMO_README.md
+
+Includes:
+  • Detailed usage instructions
+  • All command-line options
+  • Example queries
+  • Performance tips
+  • Extension ideas
+  • Troubleshooting guide
+
+
+✨ COMPARISON: MODE vs RANDOM
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Build two databases and compare:
+
+# MODE-selected data (better diversity)
+python build_retrieval_database.py \
+    --selected_indices ./datacomp_mode_cache/selected_indices.pt \
+    --model_path ./mode_output/final_clip_model.pt \
+    --output_path ./db_mode.pt
+
+# Random data (baseline)
+python build_retrieval_database.py \
+    --data_dir ./datacomp_data \
+    --model_path ./random_baseline/final_clip_model.pt \
+    --output_path ./db_random.pt
+
+# Compare side-by-side!
+# Launch two demos on different ports:
+python interactive_retrieval_demo.py --database_path ./db_mode.pt --port 7860
+python interactive_retrieval_demo.py --database_path ./db_random.pt --port 7861
+
+Try same query on both → See which retrieves better!
+
+
+🎓 TIPS FOR BEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Use descriptive queries:
+   ✓ "a golden retriever playing fetch in a park"
+   ✗ "dog"
+
+2. Be specific:
+   ✓ "sunset over ocean with pink clouds"
+   ✗ "pretty picture"
+
+3. Try variations:
+   • "happy person" vs "smiling person" vs "joyful person"
+   • Compare which works best
+
+4. Use MODE-selected data:
+   • More diverse samples
+   • Better coverage of visual concepts
+
+5. Fine-tune for your domain:
+   • Train on domain-specific data
+   • Better domain retrieval
+
+
+🎉 READY TO EXPLORE!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Your interactive retrieval demo is ready!
+
+✅ Build database:   python build_retrieval_database.py ...
+✅ Launch demo:      python interactive_retrieval_demo.py ...
+✅ Open browser:     http://localhost:7860
+✅ Have fun!         🚀
+
+Questions? Check RETRIEVAL_DEMO_README.md
+
+Happy exploring! 🔍✨

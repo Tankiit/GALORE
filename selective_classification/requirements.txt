@@ -1,0 +1,55 @@
+# MODE-VLM Requirements
+# Python 3.8+ required
+
+# Core Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Vision-Language Models
+open-clip-torch>=2.20.0
+transformers>=4.30.0
+timm>=0.9.0
+
+# Data Loading & Processing
+datasets>=2.14.0
+webdataset>=0.2.0
+huggingface_hub>=0.20.0
+Pillow>=9.5.0
+pyarrow>=12.0.0
+
+# Demo & Visualization
+gradio>=3.40.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.14.0
+
+# Logging & Monitoring
+tensorboard>=2.13.0
+wandb>=0.15.0  # Optional, for W&B logging
+tqdm>=4.65.0
+
+# Configuration
+pyyaml>=6.0
+omegaconf>=2.3.0
+
+# Utilities
+scikit-learn>=1.3.0
+pandas>=2.0.0
+requests>=2.31.0
+
+# Fast Retrieval (Optional but Recommended)
+faiss-gpu>=1.7.2  # Use faiss-cpu if no GPU available
+# faiss-cpu>=1.7.2  # Uncomment for CPU-only systems
+
+# Development & Testing (Optional)
+pytest>=7.3.0
+black>=23.3.0
+flake8>=6.0.0
+mypy>=1.3.0
+
+# Additional dependencies for specific features
+ftfy>=6.1.0  # Text cleaning
+regex>=2023.5.5  # Pattern matching
+einops>=0.6.1  # Tensor operations

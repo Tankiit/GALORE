@@ -1,0 +1,77 @@
+# Large Scale DataComp MODE Configuration
+# Optimized for server/GPU training
+
+# Dataset Configuration
+dataset:
+  name: "datacomp"
+  root: "./data"
+  size: 1000000  # 1M samples (use -1 for full dataset)
+  image_size: 224
+
+# Model Configuration
+model:
+  clip_model: "ViT-B-32"
+  pretrained: "openai"
+  device: "cuda"
+  mixed_precision: true
+
+# Selection Configuration
+selection:
+  strategy: "one_shot"
+  budget: 0.1  # Select 10% of data (100K from 1M)
+  batch_size: 512  # Large batch for GPU
+  nuclear_norm_weight: 0.3
+  clip_score_weight: 0.7
+
+# Training Configuration
+training:
+  epochs: 50
+  batch_size: 256
+  learning_rate: 0.0001
+  warmup_steps: 1000
+  optimizer: "adamw"
+  weight_decay: 0.01
+  gradient_clip: 1.0
+
+# Iterative MODE Configuration
+iterative:
+  cycles: 5
+  samples_per_cycle: 1000
+
+# Gradient Cache Configuration
+cache:
+  enabled: true
+  max_size_mb: 8192  # 8GB cache
+  staleness_threshold: 500
+  bloom_filter_size: 100000
+  hash_functions: 5
+
+# Logging Configuration
+logging:
+  tensorboard: true
+  tensorboard_dir: "./runs"
+  log_frequency: 50
+  save_frequency: 500
+  verbose: true
+
+# Output Configuration
+output:
+  checkpoint_dir: "./checkpoints"
+  results_dir: "./results"
+  save_selected_indices: true
+  save_model: true
+
+# Server Configuration
+server:
+  distributed: false
+  world_size: 1
+  rank: 0
+  backend: "nccl"
+  init_method: "env://"
+
+# Experiment Metadata
+experiment:
+  name: "datacomp_mode_large"
+  description: "Large-scale DataComp MODE training (1M samples)"
+  seed: 42
+  tags: ["datacomp", "mode", "large-scale"]

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>TensorBoard - MODE VLM Experiment</title>
+    <meta http-equiv="refresh" content="0; url=http://localhost:6006">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 30px;
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .info {
+            background: rgba(255, 255, 255, 0.2);
+            padding: 20px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        a {
+            color: #ffd700;
+            text-decoration: none;
+            font-weight: bold;
+            font-size: 1.2em;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .emoji {
+            font-size: 2em;
+            text-align: center;
+            margin: 20px 0;
+        }
+        .loading {
+            text-align: center;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 MODE VLM TensorBoard</h1>
+
+        <div class="emoji">📊</div>
+
+        <div class="info">
+            <p><strong>Status:</strong> Redirecting to TensorBoard...</p>
+            <p>If you're not redirected automatically, click below:</p>
+            <p style="text-align: center; margin-top: 20px;">
+                <a href="http://localhost:6006" target="_blank">
+                    👉 Open TensorBoard 👈
+                </a>
+            </p>
+        </div>
+
+        <div class="info">
+            <h3>📈 What to Look For:</h3>
+            <ul>
+                <li><strong>SCALARS</strong> tab - See metrics over time</li>
+                <li><strong>cache/hit_rate</strong> - Should increase after warmup</li>
+                <li><strong>cache/computes</strong> - Total gradient computations</li>
+                <li><strong>Refresh button</strong> (🔄) - If data doesn't appear</li>
+            </ul>
+        </div>
+
+        <div class="loading">
+            <p>Loading TensorBoard interface...</p>
+            <p style="font-size: 0.9em; opacity: 0.8;">
+                Make sure TensorBoard is running on port 6006
+            </p>
+        </div>
+    </div>
+</body>
+</html>
